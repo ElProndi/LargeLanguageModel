@@ -12,7 +12,8 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.set_float32_matmul_precision('medium')
 
 class FastMultiHeadAttention(nn.Module):
     """
