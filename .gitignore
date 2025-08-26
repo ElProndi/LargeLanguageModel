@@ -1,0 +1,23 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE and editor folders
+.claude/
+.vscode/
+
+# Model and training artifacts
+tokenizers/
+logs/
+checkpoints/
+
+# Python egg files
+*.egg-info/
+*.egg
+
+# Environment files
+.env
+.venv
+env/
+venv/
