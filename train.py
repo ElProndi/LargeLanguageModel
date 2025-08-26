@@ -48,10 +48,10 @@ class Trainer:
         
         self.test_mode = test_mode
         if test_mode:
-            print("🧪 Running in TEST MODE - using reduced dataset and epochs")
-            self.config['training']['num_epochs'] = 1  # Single epoch for test mode
-            self.config['logging']['eval_steps'] = 50
-            self.config['logging']['save_steps'] = 100
+            print("🧪 Running in TEST MODE - using reduced dataset and steps")
+            self.config['training']['max_steps'] = 100  # Only 100 steps for test mode
+            self.config['logging']['eval_steps'] = 50  # Not used anymore, validation_interval is used instead
+            self.config['logging']['save_steps'] = 50   # Save checkpoint every 50 steps in test mode
             self.config['logging']['logging_steps'] = 5
         
         # Setup device - CUDA is required
@@ -95,8 +95,7 @@ class Trainer:
         
         # Initialize training state early for calculations
         self.global_step = 0
-        self.current_epoch = 0
-        self.num_epochs = self.config['training']['num_epochs']
+        self.max_steps = self.config['training']['max_steps']
         self.best_val_loss = float('inf')
         
         # Get gradient accumulation steps early for correct calculations
@@ -142,11 +141,14 @@ class Trainer:
         if self.batches_per_epoch % self.gradient_accumulation_steps != 0:
             self.steps_per_epoch += 1
         
-        # Calculate total training steps based on actual optimizer steps
-        self.total_training_steps = self.num_epochs * self.steps_per_epoch
+        # Set total training steps to max_steps from config
+        self.total_training_steps = self.max_steps
         
-        # Validation frequency: every 10% of actual optimizer steps in an epoch
-        self.validation_interval = max(1, self.steps_per_epoch // 10)
+        # Validation frequency: every 1000 steps (or less for test mode)
+        if self.test_mode:
+            self.validation_interval = 50  # Validate every 50 steps in test mode
+        else:
+            self.validation_interval = max(1000, self.max_steps // 10)  # At least every 1000 steps
         
         # Setup training components (scheduler needs total_training_steps)
         print(" done.\nSetting up optimizer and scheduler...")
@@ -168,12 +170,14 @@ class Trainer:
         print(f"  • Gradient accumulation steps: {self.gradient_accumulation_steps}")
         print(f"  • Effective batch size: {self.config['training']['batch_size'] * self.gradient_accumulation_steps}")
         print(f"  • Learning rate: {self.config['training']['learning_rate']}")
-        print(f"  • Number of epochs: {self.num_epochs}")
+        print(f"  • Maximum training steps: {self.max_steps:,}")
         print(f"  • Batches per epoch: {self.batches_per_epoch}")
         print(f"  • Optimizer steps per epoch: {self.steps_per_epoch}")
         print(f"  • Total training steps: {self.total_training_steps:,}")
-        print(f"  • Warmup steps: {self.config['training']['warmup_steps']}")
-        print(f"  • Validation interval: every {self.validation_interval} optimizer steps (~10% of epoch)")
+        print(f"  • Warmup steps: {int(self.max_steps * self.config['training']['warmup_ratio'])} (1% of max steps)")
+        print(f"  • Cosine target: {int(self.max_steps * self.config['training']['cosine_target_ratio'])} steps (80% of training)")
+        print(f"  • Validation interval: every {self.validation_interval} steps")
+        print(f"  • Checkpoint saving: every {self.config['logging']['save_steps']} steps + after each validation")
     
     def _setup_model(self) -> nn.Module:
         """Setup and optionally compile the model.
@@ -312,13 +316,15 @@ class Trainer:
         Returns:
             Configured scheduler
         """
-        # Calculate total steps based on epochs and steps per epoch
-        # Note: this is calculated before calling this method
+        # Calculate warmup steps from ratio
+        warmup_steps = int(self.max_steps * self.config['training']['warmup_ratio'])
+        
         scheduler = get_cosine_schedule_with_warmup(
             self.optimizer,
-            num_warmup_steps=self.config['training']['warmup_steps'],
+            num_warmup_steps=warmup_steps,
             num_training_steps=self.total_training_steps,
-            min_lr_ratio=self.config['training']['min_learning_rate'] / self.config['training']['learning_rate']
+            min_lr_ratio=self.config['training']['min_learning_rate'] / self.config['training']['learning_rate'],
+            cosine_target_ratio=self.config['training']['cosine_target_ratio']
         )
         
         return scheduler
@@ -442,7 +448,6 @@ class Trainer:
         # Prepare checkpoint data
         checkpoint = {
             'global_step': self.global_step,
-            'current_epoch': self.current_epoch,
             'current_data_subset': self.current_data_subset,  # Save which subset we're on
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -496,8 +501,41 @@ class Trainer:
         # Note: weights_only=False is safe here since we're loading our own trained checkpoints
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
+        # Check if checkpoint has config and verify compatibility
+        if 'config' in checkpoint:
+            saved_config = checkpoint['config']
+            
+            # Check critical model architecture parameters
+            model_params = ['vocab_size', 'hidden_size', 'num_layers', 'num_heads', 'max_position_embeddings']
+            mismatches = []
+            
+            for param in model_params:
+                saved_val = saved_config['model'].get(param)
+                current_val = self.config['model'].get(param)
+                if saved_val != current_val:
+                    mismatches.append(f"    {param}: checkpoint={saved_val}, current={current_val}")
+            
+            if mismatches:
+                print("\n  ⚠️  WARNING: Model architecture mismatch detected!")
+                print("  The checkpoint was trained with different model parameters:")
+                for mismatch in mismatches:
+                    print(mismatch)
+                print("\n  This will likely cause errors when loading model weights.")
+                print("  Consider using the same config.json that was used for training.")
+                response = input("\n  Continue anyway? (y/n): ")
+                if response.lower() != 'y':
+                    print("  Checkpoint loading cancelled.")
+                    sys.exit(1)
+        
         # Restore model state
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        try:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+        except RuntimeError as e:
+            print(f"\n  ❌ ERROR: Failed to load model weights!")
+            print(f"  {str(e)}")
+            print("\n  This usually happens when the model architecture doesn't match.")
+            print("  Make sure you're using the same config.json that was used for training.")
+            sys.exit(1)
         
         # Restore optimizer state
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -507,19 +545,23 @@ class Trainer:
         
         # Restore training state
         self.global_step = checkpoint['global_step']
-        self.current_epoch = checkpoint.get('epoch', checkpoint.get('current_epoch', 0))
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         
         # Restore data subset state if available
         saved_subset = checkpoint.get('current_data_subset', 'first_third')
         
-        print(f"  Resumed from step {self.global_step}, epoch {self.current_epoch}")
+        print(f"  Resumed from step {self.global_step}/{self.max_steps}")
         print(f"  Best validation loss: {self.best_val_loss:.4f}")
         print(f"  Data subset: {saved_subset}")
         
         # Load the appropriate data subset
         if saved_subset:
             self._create_dataloaders(saved_subset)
+        
+        # Check if already completed
+        if self.global_step >= self.max_steps:
+            print(f"  WARNING: Already completed {self.global_step} steps (max_steps: {self.max_steps})")
+            print(f"  Training will end immediately unless max_steps is increased.")
     
     def train(self):
         """Main training loop with proper gradient accumulation and data subset switching."""
@@ -539,16 +581,20 @@ class Trainer:
         accumulated_tokens = 0
         iteration_start_time = None  # Track timing across accumulation
         
-        # Training loop
+        # Training loop - continue until max_steps reached
+        data_thirds = ['first_third', 'second_third', 'third_third']
+        current_third_idx = data_thirds.index(self.current_data_subset) if hasattr(self, 'current_data_subset') and self.current_data_subset else 0
+        
         try:
-            for epoch in range(self.current_epoch, self.num_epochs):
-                self.current_epoch = epoch + 1
-                print(f"\n{'='*70}")
-                print(f"EPOCH {self.current_epoch}/{self.num_epochs}")
-                print(f"{'='*70}")
-                
-                # Train on all three thirds of the data for each epoch
-                for data_third in ['first_third', 'second_third', 'third_third']:
+            while self.global_step < self.max_steps:
+                # Cycle through data thirds continuously
+                for third_idx in range(current_third_idx, len(data_thirds)):
+                    data_third = data_thirds[third_idx]
+                    
+                    # Check if we've reached max_steps before processing new third
+                    if self.global_step >= self.max_steps:
+                        break
+                    
                     # Load the appropriate data subset
                     if self.current_data_subset != data_third:
                         if self.train_loader is None:
@@ -558,11 +604,15 @@ class Trainer:
                             # Switch to new subset
                             self._switch_data_subset(data_third)
                     
-                    print(f"\nTraining on {data_third}")
+                    print(f"\nTraining on {data_third} (Step {self.global_step}/{self.max_steps})")
                     print(f"{'─'*50}")
                     
                     # Training on current data subset
                     for batch_idx, batch in enumerate(self.train_loader):
+                        # Check if we've reached max_steps
+                        if self.global_step >= self.max_steps:
+                            print(f"\nReached maximum training steps ({self.max_steps})")
+                            break
                         # Start timing at the beginning of each accumulation cycle
                         # This captures data loading time for ALL accumulated batches
                         if accumulation_counter == 0:
@@ -664,14 +714,8 @@ class Trainer:
                             accumulated_loss = 0.0
                             accumulated_tokens = 0
                 
-                # End of epoch validation
-                print(f"\n{'='*70}")
-                print(f"End of Epoch {self.current_epoch} Validation")
-                print(f"{'='*70}")
-                val_metrics = self.validate()
-                self.logger.log_scalars(val_metrics, self.global_step, prefix="validation")
-                print(f"Val Loss: {val_metrics['val_loss']:.4f} | Val PPL: {val_metrics['val_perplexity']:.2f}")
-                print(f"{'='*70}\n")
+                # Reset to first_third after completing all thirds
+                current_third_idx = 0
         
         except KeyboardInterrupt:
             print("\n\nTraining interrupted by user")
@@ -694,7 +738,7 @@ class Trainer:
             print(f"Training Complete")
             print(f"{'='*70}")
             print(f"\nFinal Metrics:")
-            print(f"  • Total steps: {self.global_step:,}")
+            print(f"  • Total steps: {self.global_step:,}/{self.max_steps:,} ({100*self.global_step/self.max_steps:.1f}% complete)")
             print(f"  • Total tokens: {summary['progress']['total_tokens']:,}")
             print(f"  • Training time: {summary['progress']['training_hours']:.2f} hours")
             print(f"  • Best validation loss: {self.best_val_loss:.4f}")

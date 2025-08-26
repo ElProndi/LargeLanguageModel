@@ -13,14 +13,15 @@ def get_cosine_schedule_with_warmup(
     num_training_steps: int,
     num_cycles: float = 0.5,
     min_lr_ratio: float = 0.01,
+    cosine_target_ratio: float = 1.0,
     last_epoch: int = -1
 ) -> LambdaLR:
     """Create a schedule with a learning rate that decreases following the values of the cosine function.
     
     The schedule has three phases:
     1. Linear warmup from 0 to peak learning rate
-    2. Cosine annealing from peak to minimum
-    3. Constant minimum learning rate (if min_lr_ratio > 0)
+    2. Cosine annealing from peak to minimum (until cosine_target_ratio of training)
+    3. Constant minimum learning rate (after cosine_target_ratio)
     
     Args:
         optimizer: The optimizer for which to schedule the learning rate
@@ -28,11 +29,15 @@ def get_cosine_schedule_with_warmup(
         num_training_steps: Total number of training steps
         num_cycles: Number of cosine cycles (0.5 = half cosine)
         min_lr_ratio: Minimum learning rate as ratio of initial (e.g., 0.01 = 1% of initial)
+        cosine_target_ratio: Fraction of training at which to reach minimum LR (e.g., 0.8 = 80%)
         last_epoch: The index of last epoch when resuming training
         
     Returns:
         LambdaLR scheduler with the appropriate schedule
     """
+    
+    # Calculate the step at which cosine reaches minimum
+    cosine_end_step = int(num_training_steps * cosine_target_ratio)
     
     def lr_lambda(current_step: int) -> float:
         """Calculate learning rate multiplier for current step.
@@ -47,8 +52,13 @@ def get_cosine_schedule_with_warmup(
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
         
-        # Cosine annealing phase
-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        # Check if we're past the cosine annealing phase
+        if current_step >= cosine_end_step:
+            # Maintain minimum learning rate
+            return min_lr_ratio
+        
+        # Cosine annealing phase (adjusted to reach minimum at cosine_end_step)
+        progress = float(current_step - num_warmup_steps) / float(max(1, cosine_end_step - num_warmup_steps))
         
         # Calculate cosine multiplier
         cosine_mult = 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress))
