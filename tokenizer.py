@@ -184,11 +184,16 @@ class WikipediaTokenizer:
             # Use encode_batch_fast for maximum speed - skips offset tracking
             # This is faster than encode_batch since we don't need character offsets
             encodings = self.tokenizer.encode_batch_fast(text, add_special_tokens=add_special_tokens)
-            return [enc.ids for enc in encodings]
+            # Ensure each encoding returns a list
+            return [list(enc.ids) if not isinstance(enc.ids, list) else enc.ids for enc in encodings]
         else:
             # Single encoding - already optimized
             encoding = self.tokenizer.encode(text, add_special_tokens=add_special_tokens)
-            return encoding.ids
+            # Ensure we return a list (encoding.ids might be tuple or other type)
+            ids = encoding.ids
+            if not isinstance(ids, list):
+                ids = list(ids)
+            return ids
     
     def decode(self, ids: Union[List[int], List[List[int]]], skip_special_tokens: bool = True) -> Union[str, List[str]]:
         """Fast decoding of token IDs to text using optimized Rust implementation.

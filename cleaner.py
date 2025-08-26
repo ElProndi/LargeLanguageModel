@@ -80,6 +80,17 @@ COMBINED_CLEANUP = re.compile(
     re.DOTALL                      # Allow . to match newlines
 )
 
+# Combined pattern for inference - same as above but WITHOUT brace matching
+# This preserves curly braces which may be meaningful in benchmark texts
+COMBINED_CLEANUP_INFERENCE = re.compile(
+    r'https?://[^\s]+|'           # URLs
+    r'\[\[.*?\]\]|'                # Wiki links [[...]]
+    r'<[^>]+>|'                    # HTML tags
+    r'\[[^\]]*\]|'                 # Brackets [...] 
+    r'REDIRECT',                   # REDIRECT keyword
+    re.DOTALL                      # Allow . to match newlines
+)
+
 # Fast ASCII lookup table (256 entries for all byte values)
 ASCII_TABLE = np.zeros(256, dtype=np.uint8)
 for i in range(128):  # ASCII range
@@ -217,10 +228,7 @@ def clean_text(text):
             f"Text extraction may have failed"
         )
     
-    # Early exit for redirect/disambiguation
-    if len(text) < 15:
-        return text  # Too short to be redirect/disambiguation
-    
+    # Check for redirect/disambiguation (but don't skip cleaning for short texts)
     # Quick checks without creating substrings
     first_50 = text[:50] if len(text) > 50 else text
     if 'REDIRECT' in first_50:
@@ -306,6 +314,131 @@ def clean_text(text):
     text = text.strip()
     
     return text
+
+def clean_text_for_inference(text):
+    """Clean text for inference - same as clean_text but preserves curly braces {}.
+    
+    This function is designed for use during inference on benchmark datasets where
+    curly braces may be meaningful (e.g., code snippets, mathematical notation).
+    
+    Differences from clean_text():
+    - Preserves all curly braces {} 
+    - Does not perform recursive brace removal
+    - Otherwise applies identical cleaning (ASCII conversion, whitespace normalization)
+    
+    Args:
+        text: Input text to clean
+        
+    Returns:
+        Cleaned ASCII-only text with curly braces preserved
+    """
+    if not text:
+        return ""
+    
+    # Validate input type
+    if not isinstance(text, str):
+        raise TypeError(
+            f"Expected text to be string, got {type(text).__name__}\n"
+            f"Text extraction may have failed"
+        )
+    
+    # Check for redirect/disambiguation (but don't skip cleaning for short texts)
+    # Quick checks without creating substrings
+    first_50 = text[:50] if len(text) > 50 else text
+    if 'REDIRECT' in first_50:
+        return ""
+    if 'may refer to:' in first_50.lower():
+        return ""
+    
+    # Always perform ASCII conversion to ensure complete cleaning
+    has_non_ascii = True  # Always convert to be safe
+    
+    # Single-pass cleanup with inference pattern (no brace removal)
+    # Process in chunks to reduce memory pressure
+    if len(text) > 10000:  # Large text - process in chunks
+        result = StringIO()
+        chunk_size = 5000
+        overlap = 100  # To handle patterns at boundaries
+        
+        for i in range(0, len(text), chunk_size):
+            end = min(i + chunk_size + overlap, len(text))
+            chunk = text[i:end]
+            
+            # Apply cleanups WITHOUT brace removal
+            chunk = COMBINED_CLEANUP_INFERENCE.sub(' ', chunk)
+            
+            # NO brace handling - preserve them as-is
+            
+            # ASCII conversion if needed
+            if has_non_ascii:
+                # Fast single-pass conversion
+                chunk = chunk.translate(ACCENT_TRANS_SINGLE)
+                for char, replacement in ACCENT_MULTI.items():
+                    if char in chunk:
+                        chunk = chunk.replace(char, replacement)
+                # Always do final ASCII conversion to catch any remaining non-ASCII
+                chunk = unicodedata.normalize('NFKD', chunk)
+                chunk = chunk.encode('ascii', 'ignore').decode('ascii')
+            
+            # Write processed chunk
+            if i == 0:
+                result.write(chunk)
+            else:
+                # Skip overlap portion
+                result.write(chunk[overlap:])
+        
+        text = result.getvalue()
+        result.close()
+    else:
+        # Small text - process all at once
+        text = COMBINED_CLEANUP_INFERENCE.sub(' ', text)
+        
+        # NO brace handling - preserve them as-is
+        
+        # ASCII conversion if needed
+        if has_non_ascii:
+            text = text.translate(ACCENT_TRANS_SINGLE)
+            for char, replacement in ACCENT_MULTI.items():
+                if char in text:
+                    text = text.replace(char, replacement)
+            # Always do final ASCII conversion to catch any remaining non-ASCII
+            text = unicodedata.normalize('NFKD', text)
+            text = text.encode('ascii', 'ignore').decode('ascii')
+    
+    # Final whitespace cleanup - single pass
+    text = PATTERNS['spaces'].sub(' ', text.replace('\t', ' ').replace('\n', ' '))
+    text = text.strip()
+    
+    return text
+
+def clean_for_tokenizer(text, preserve_braces=True):
+    """Convenience wrapper for cleaning text before tokenization.
+    
+    This is the main entry point for external code that needs to clean text
+    before passing it to the tokenizer during inference.
+    
+    Args:
+        text: Input text to clean
+        preserve_braces: If True (default), preserves curly braces for inference.
+                        If False, removes them as in training data cleaning.
+    
+    Returns:
+        Cleaned ASCII-only text ready for tokenization
+    
+    Example:
+        >>> from cleaner import clean_for_tokenizer
+        >>> # For inference on benchmarks (preserves braces)
+        >>> clean_text = clean_for_tokenizer("Hello {world}! Çà va?")
+        >>> print(clean_text)  # "Hello {world}! Ca va?"
+        >>> 
+        >>> # For training-style cleaning (removes braces)
+        >>> clean_text = clean_for_tokenizer("Hello {world}!", preserve_braces=False)
+        >>> print(clean_text)  # "Hello  world !"
+    """
+    if preserve_braces:
+        return clean_text_for_inference(text)
+    else:
+        return clean_text(text)
 
 def process_file_worker(args):
     """Worker function for multiprocessing - processes a single JSONL file."""
