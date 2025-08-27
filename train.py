@@ -105,35 +105,44 @@ class Trainer:
         # This avoids loading ~13GB into GPU memory just to count batches
         print("Calculating training steps...", end='')
         
-        # Get statistics for first third
-        first_third_stats = calculate_dataloader_stats(
+        # Get statistics for first fourth
+        first_fourth_stats = calculate_dataloader_stats(
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='first_third'
+            file_subset='first_fourth'
         )
         
-        # Get statistics for second third
-        second_third_stats = calculate_dataloader_stats(
+        # Get statistics for second fourth
+        second_fourth_stats = calculate_dataloader_stats(
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='second_third'
+            file_subset='second_fourth'
         )
         
-        # Get statistics for third third
-        third_third_stats = calculate_dataloader_stats(
+        # Get statistics for third fourth
+        third_fourth_stats = calculate_dataloader_stats(
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='third_third'
+            file_subset='third_fourth'
         )
         
-        # Calculate batch counts - we have 3 thirds, sum their batches
-        # Note: The thirds may have slightly different batch counts due to file distribution
-        self.batches_per_epoch = (first_third_stats['train_batches'] + 
-                                   second_third_stats['train_batches'] + 
-                                   third_third_stats['train_batches'])
+        # Get statistics for fourth fourth
+        fourth_fourth_stats = calculate_dataloader_stats(
+            batch_size=self.config['training']['batch_size'],
+            val_split=0.1,
+            test_mode=self.test_mode,
+            file_subset='fourth_fourth'
+        )
+        
+        # Calculate batch counts - we have 4 fourths, sum their batches
+        # Note: The fourths may have slightly different batch counts due to file distribution
+        self.batches_per_epoch = (first_fourth_stats['train_batches'] + 
+                                   second_fourth_stats['train_batches'] + 
+                                   third_fourth_stats['train_batches'] + 
+                                   fourth_fourth_stats['train_batches'])
         
         # With gradient accumulation, optimizer steps = batches / accumulation_steps
         self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
@@ -197,11 +206,11 @@ class Trainer:
         
         return model
     
-    def _create_dataloaders(self, file_subset: str = 'first_third') -> Tuple[DataLoader, DataLoader, Dict]:
+    def _create_dataloaders(self, file_subset: str = 'first_fourth') -> Tuple[DataLoader, DataLoader, Dict]:
         """Create train and validation data loaders for specified subset.
         
         Args:
-            file_subset: Which files to load ('first_third', 'second_third', or 'third_third')
+            file_subset: Which files to load ('first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth')
         
         Returns:
             Tuple of (train_loader, val_loader, info_dict)
@@ -216,7 +225,7 @@ class Trainer:
             test_mode=self.test_mode,
             verbose=True,
             seed=42,  # Consistent split across runs
-            file_subset=file_subset  # Load only specified third
+            file_subset=file_subset  # Load only specified fourth
         )
         
         # Store references
@@ -242,7 +251,7 @@ class Trainer:
         """Switch to a different data subset, destroying old dataloaders first.
         
         Args:
-            new_subset: Which subset to switch to ('first_third', 'second_third', or 'third_third')
+            new_subset: Which subset to switch to ('first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth')
         """
         if self.current_data_subset == new_subset:
             print(f"Already using {new_subset}, skipping switch")
@@ -548,7 +557,7 @@ class Trainer:
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         
         # Restore data subset state if available
-        saved_subset = checkpoint.get('current_data_subset', 'first_third')
+        saved_subset = checkpoint.get('current_data_subset', 'first_fourth')
         
         print(f"  Resumed from step {self.global_step}/{self.max_steps}")
         print(f"  Best validation loss: {self.best_val_loss:.4f}")
@@ -582,29 +591,29 @@ class Trainer:
         iteration_start_time = None  # Track timing across accumulation
         
         # Training loop - continue until max_steps reached
-        data_thirds = ['first_third', 'second_third', 'third_third']
-        current_third_idx = data_thirds.index(self.current_data_subset) if hasattr(self, 'current_data_subset') and self.current_data_subset else 0
+        data_fourths = ['first_fourth', 'second_fourth', 'third_fourth', 'fourth_fourth']
+        current_fourth_idx = data_fourths.index(self.current_data_subset) if hasattr(self, 'current_data_subset') and self.current_data_subset else 0
         
         try:
             while self.global_step < self.max_steps:
-                # Cycle through data thirds continuously
-                for third_idx in range(current_third_idx, len(data_thirds)):
-                    data_third = data_thirds[third_idx]
+                # Cycle through data fourths continuously
+                for fourth_idx in range(current_fourth_idx, len(data_fourths)):
+                    data_fourth = data_fourths[fourth_idx]
                     
-                    # Check if we've reached max_steps before processing new third
+                    # Check if we've reached max_steps before processing new fourth
                     if self.global_step >= self.max_steps:
                         break
                     
                     # Load the appropriate data subset
-                    if self.current_data_subset != data_third:
+                    if self.current_data_subset != data_fourth:
                         if self.train_loader is None:
                             # First time loading data
-                            self._create_dataloaders(data_third)
+                            self._create_dataloaders(data_fourth)
                         else:
                             # Switch to new subset
-                            self._switch_data_subset(data_third)
+                            self._switch_data_subset(data_fourth)
                     
-                    print(f"\nTraining on {data_third} (Step {self.global_step}/{self.max_steps})")
+                    print(f"\nTraining on {data_fourth} (Step {self.global_step}/{self.max_steps})")
                     print(f"{'─'*50}")
                     
                     # Training on current data subset
@@ -666,7 +675,7 @@ class Trainer:
                             
                             # Print step metrics with data subset indicator
                             # Time shown is TOTAL time for all gradient accumulation steps
-                            print(f"[{data_third:12s}] Step {self.global_step:5d}/{self.total_training_steps} | "
+                            print(f"[{data_fourth:12s}] Step {self.global_step:5d}/{self.total_training_steps} | "
                                   f"{iteration_time * 1000:6.0f}ms | "
                                   f"Loss: {avg_loss:7.4f} | "
                                   f"PPL: {perplexity:8.2f} | "
@@ -684,7 +693,7 @@ class Trainer:
                             # validation_interval is already correctly calculated in __init__
                             if self.global_step > 0 and self.global_step % self.validation_interval == 0:
                                 print(f"\n{'='*70}")
-                                print(f"Validation at step {self.global_step} (on {data_third})")
+                                print(f"Validation at step {self.global_step} (on {data_fourth})")
                                 print(f"{'='*70}")
                                 
                                 # Run validation on current subset's validation split
@@ -714,8 +723,8 @@ class Trainer:
                             accumulated_loss = 0.0
                             accumulated_tokens = 0
                 
-                # Reset to first_third after completing all thirds
-                current_third_idx = 0
+                # Reset to first_fourth after completing all fourths
+                current_fourth_idx = 0
         
         except KeyboardInterrupt:
             print("\n\nTraining interrupted by user")

@@ -108,7 +108,8 @@ def create_simple_train_val_dataloaders(
         verbose: Print progress
         seed: Random seed for splitting
         file_subset: Which files to load ('all', 'first_half', 'second_half',
-                     'first_third', 'second_third', 'third_third')
+                     'first_third', 'second_third', 'third_third',
+                     'first_fourth', 'second_fourth', 'third_fourth', 'fourth_fourth')
         
     Returns:
         Tuple of (train_loader, val_loader, info_dict)
@@ -194,12 +195,55 @@ def create_simple_train_val_dataloaders(
         numpy_files = numpy_files[start_idx:]
         if verbose:
             print(f"  Loading third third: {len(numpy_files)} of {total_files} files (indices {start_idx}-{total_files-1})")
+    elif file_subset == 'first_fourth':
+        # Load first fourth of files (files 0-9 for 38 total)
+        num_files_per_fourth = total_files // 4
+        # First fourth gets one extra if remainder > 0
+        if total_files % 4 > 0:
+            num_files_per_fourth += 1
+        numpy_files = numpy_files[:num_files_per_fourth]
+        if verbose:
+            print(f"  Loading first fourth: {len(numpy_files)} of {total_files} files (indices 0-{len(numpy_files)-1})")
+    elif file_subset == 'second_fourth':
+        # Load second fourth of files (files 10-19 for 38 total)
+        num_files_per_fourth = total_files // 4
+        # Calculate sizes for each fourth
+        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
+        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
+        start_idx = first_fourth_size
+        end_idx = first_fourth_size + second_fourth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+        if verbose:
+            print(f"  Loading second fourth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
+    elif file_subset == 'third_fourth':
+        # Load third fourth of files (files 20-28 for 38 total)
+        num_files_per_fourth = total_files // 4
+        # Calculate sizes for each fourth
+        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
+        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
+        third_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 2 else 0)
+        start_idx = first_fourth_size + second_fourth_size
+        end_idx = first_fourth_size + second_fourth_size + third_fourth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+        if verbose:
+            print(f"  Loading third fourth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
+    elif file_subset == 'fourth_fourth':
+        # Load fourth fourth of files (files 29-37 for 38 total)
+        num_files_per_fourth = total_files // 4
+        # Calculate where fourth fourth starts
+        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
+        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
+        third_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 2 else 0)
+        start_idx = first_fourth_size + second_fourth_size + third_fourth_size
+        numpy_files = numpy_files[start_idx:]
+        if verbose:
+            print(f"  Loading fourth fourth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{total_files-1})")
     elif file_subset == 'all':
         # Load all files (default behavior)
         if verbose:
             print(f"  Loading all {len(numpy_files)} files")
     else:
-        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_half', 'second_half', 'first_third', 'second_third', or 'third_third'")
+        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_half', 'second_half', 'first_third', 'second_third', 'third_third', 'first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth'")
     
     # Load selected files and concatenate
     all_arrays = []
@@ -354,7 +398,8 @@ def calculate_dataloader_stats(
         val_split: Fraction of data for validation 
         test_mode: Use subset for testing
         file_subset: Which files to load ('all', 'first_half', 'second_half',
-                     'first_third', 'second_third', 'third_third')
+                     'first_third', 'second_third', 'third_third',
+                     'first_fourth', 'second_fourth', 'third_fourth', 'fourth_fourth')
         
     Returns:
         Dictionary with calculated statistics
@@ -407,8 +452,35 @@ def calculate_dataloader_stats(
         second_third_size = num_files_per_third + (1 if total_files % 3 == 2 else 0)
         start_idx = first_third_size + second_third_size
         numpy_files = numpy_files[start_idx:]
+    elif file_subset == 'first_fourth':
+        num_files_per_fourth = total_files // 4
+        if total_files % 4 > 0:
+            num_files_per_fourth += 1
+        numpy_files = numpy_files[:num_files_per_fourth]
+    elif file_subset == 'second_fourth':
+        num_files_per_fourth = total_files // 4
+        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
+        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
+        start_idx = first_fourth_size
+        end_idx = first_fourth_size + second_fourth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+    elif file_subset == 'third_fourth':
+        num_files_per_fourth = total_files // 4
+        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
+        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
+        third_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 2 else 0)
+        start_idx = first_fourth_size + second_fourth_size
+        end_idx = first_fourth_size + second_fourth_size + third_fourth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+    elif file_subset == 'fourth_fourth':
+        num_files_per_fourth = total_files // 4
+        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
+        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
+        third_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 2 else 0)
+        start_idx = first_fourth_size + second_fourth_size + third_fourth_size
+        numpy_files = numpy_files[start_idx:]
     elif file_subset != 'all':
-        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_half', 'second_half', 'first_third', 'second_third', or 'third_third'")
+        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_half', 'second_half', 'first_third', 'second_third', 'third_third', 'first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth'")
     
     # Calculate total sequences by checking file shapes
     # We can get this from the metadata or by quickly checking file shapes
