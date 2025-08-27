@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Wikipedia article cleaner - extracts and cleans text to ASCII."""
+"""Wikipedia article cleaner - extracts text preserving Unicode, URLs, and wiki links."""
 
 import orjson  # Fast JSON parser (3-10x faster than standard json)
 import re
 import sys
 import time
-import unicodedata
 from pathlib import Path
 from collections import defaultdict
 import multiprocessing as mp
 from io import StringIO
-import numpy as np
 
 class PhaseTimer:
     """Track timing for different processing phases."""
@@ -56,95 +54,28 @@ class PhaseTimer:
             lines.append(f"  {phase:20s}: {time_spent_ms:8.1f}ms ({pct:5.1f}%)")
         return "\n".join(lines)
 
-# Compiled regex patterns
+# Compiled regex patterns (kept for reference, but urls and wiki_links are now preserved)
 PATTERNS = {
-    'url': re.compile(r'https?://[^\s]+'),
-    'wiki_link': re.compile(r'\[\[.*?\]\]'),
-    'html': re.compile(r'<[^>]+>'),
-    'brackets': re.compile(r'\[.*?\]'),
-    'braces': re.compile(r'\{[^{}]*\}'),
+    'url': re.compile(r'https?://[^\s]+'),  # Preserved in output
+    'wiki_link': re.compile(r'\[\[.*?\]\]'),  # Preserved in output
+    'html': re.compile(r'<[^>]+>'),  # Removed from output
     'spaces': re.compile(r'\s+'),
     'redirect': re.compile(r'.*REDIRECT.*'),  # Only uppercase - Wikipedia directive
     'disambiguation': re.compile(r'.*may refer to:.*', re.IGNORECASE)
 }
 
 # Combined pattern for single-pass replacement - optimized for performance
-# This matches URLs, wiki links, HTML tags, brackets, and simple braces in one go
+# This only matches HTML tags and REDIRECT keyword, preserving URLs and wiki links
 COMBINED_CLEANUP = re.compile(
-    r'https?://[^\s]+|'           # URLs
-    r'\[\[.*?\]\]|'                # Wiki links [[...]]
     r'<[^>]+>|'                    # HTML tags
-    r'\[[^\]]*\]|'                 # Brackets [...]
-    r'\{[^{}]*\}|'                 # Simple braces {...}
     r'REDIRECT',                   # REDIRECT keyword
     re.DOTALL                      # Allow . to match newlines
 )
 
-# Combined pattern for inference - same as above but WITHOUT brace matching
-# This preserves curly braces which may be meaningful in benchmark texts
-COMBINED_CLEANUP_INFERENCE = re.compile(
-    r'https?://[^\s]+|'           # URLs
-    r'\[\[.*?\]\]|'                # Wiki links [[...]]
-    r'<[^>]+>|'                    # HTML tags
-    r'\[[^\]]*\]|'                 # Brackets [...] 
-    r'REDIRECT',                   # REDIRECT keyword
-    re.DOTALL                      # Allow . to match newlines
-)
+# Since we now preserve brackets and braces in both modes, this is identical to COMBINED_CLEANUP
+COMBINED_CLEANUP_INFERENCE = COMBINED_CLEANUP
 
-# Fast ASCII lookup table (256 entries for all byte values)
-ASCII_TABLE = np.zeros(256, dtype=np.uint8)
-for i in range(128):  # ASCII range
-    ASCII_TABLE[i] = i
-# Map common accented characters directly
-ASCII_TABLE[ord('à')] = ord('a')
-ASCII_TABLE[ord('á')] = ord('a')
-ASCII_TABLE[ord('â')] = ord('a')
-ASCII_TABLE[ord('ã')] = ord('a')
-ASCII_TABLE[ord('ä')] = ord('a')  # Will be handled specially for 'ae'
-ASCII_TABLE[ord('å')] = ord('a')
-ASCII_TABLE[ord('è')] = ord('e')
-ASCII_TABLE[ord('é')] = ord('e')
-ASCII_TABLE[ord('ê')] = ord('e')
-ASCII_TABLE[ord('ë')] = ord('e')  # Will be handled specially for 'ee'
-ASCII_TABLE[ord('ì')] = ord('i')
-ASCII_TABLE[ord('í')] = ord('i')
-ASCII_TABLE[ord('î')] = ord('i')
-ASCII_TABLE[ord('ï')] = ord('i')  # Will be handled specially for 'ii'
-ASCII_TABLE[ord('ò')] = ord('o')
-ASCII_TABLE[ord('ó')] = ord('o')
-ASCII_TABLE[ord('ô')] = ord('o')
-ASCII_TABLE[ord('õ')] = ord('o')
-ASCII_TABLE[ord('ö')] = ord('o')  # Will be handled specially for 'oe'
-ASCII_TABLE[ord('ù')] = ord('u')
-ASCII_TABLE[ord('ú')] = ord('u')
-ASCII_TABLE[ord('û')] = ord('u')
-ASCII_TABLE[ord('ü')] = ord('u')  # Will be handled specially for 'ue'
-ASCII_TABLE[ord('ñ')] = ord('n')
-ASCII_TABLE[ord('ç')] = ord('c')
-ASCII_TABLE[ord('ß')] = ord('s')
-
-# Build translation table for str.translate()
-ACCENT_TRANS_SINGLE = str.maketrans({
-    # Single character replacements only
-    'ß': 's', 'Ñ': 'N', 'ñ': 'n', 'Ç': 'C', 'ç': 'c',
-    'à': 'a', 'á': 'a', 'â': 'a', 'ã': 'a', 'å': 'a',
-    'è': 'e', 'é': 'e', 'ê': 'e',
-    'ì': 'i', 'í': 'i', 'î': 'i',
-    'ò': 'o', 'ó': 'o', 'ô': 'o', 'õ': 'o',
-    'ù': 'u', 'ú': 'u', 'û': 'u',
-    'À': 'A', 'Á': 'A', 'Â': 'A', 'Ã': 'A', 'Å': 'A',
-    'È': 'E', 'É': 'E', 'Ê': 'E',
-    'Ì': 'I', 'Í': 'I', 'Î': 'I',
-    'Ò': 'O', 'Ó': 'O', 'Ô': 'O', 'Õ': 'O',
-    'Ù': 'U', 'Ú': 'U', 'Û': 'U'
-})
-
-# Multi-character replacements
-ACCENT_MULTI = {
-    'ä': 'ae', 'ë': 'ee', 'ï': 'ii', 'ö': 'oe', 'ü': 'ue',
-    'Ä': 'AE', 'Ë': 'EE', 'Ï': 'II', 'Ö': 'OE', 'Ü': 'UE',
-    'æ': 'ae', 'œ': 'oe', 'Æ': 'AE', 'Œ': 'OE'
-}
+# ASCII conversion infrastructure removed - we now preserve Unicode characters
 
 def extract_text(article):
     """Extract all text from Wikipedia article JSON using StringIO buffer"""
@@ -217,7 +148,7 @@ def extract_text(article):
     return text if text else None
 
 def clean_text(text):
-    """Clean text to ASCII-only - optimized for minimal memory copies."""
+    """Clean text preserving Unicode, URLs, and wiki links - only removes HTML tags."""
     if not text:
         return ""
     
@@ -228,217 +159,59 @@ def clean_text(text):
             f"Text extraction may have failed"
         )
     
-    # Check for redirect/disambiguation (but don't skip cleaning for short texts)
-    # Quick checks without creating substrings
+    # Check for redirect/disambiguation
     first_50 = text[:50] if len(text) > 50 else text
     if 'REDIRECT' in first_50:
         return ""
     if 'may refer to:' in first_50.lower():
         return ""
     
-    # Always perform ASCII conversion to ensure complete cleaning
-    # The previous optimization was buggy - it only checked first 1000 bytes
-    # This caused UTF-8 characters later in text to slip through
-    has_non_ascii = True  # Always convert to be safe
+    # Single-pass cleanup: remove only HTML tags and REDIRECT keyword
+    # Preserves: URLs, wiki links [[...]], brackets [...], braces {...}, Unicode
+    text = COMBINED_CLEANUP.sub(' ', text)
     
-    # Single-pass cleanup with all patterns combined
-    # Process in chunks to reduce memory pressure
-    if len(text) > 10000:  # Large text - process in chunks
-        result = StringIO()
-        chunk_size = 5000
-        overlap = 100  # To handle patterns at boundaries
-        
-        for i in range(0, len(text), chunk_size):
-            end = min(i + chunk_size + overlap, len(text))
-            chunk = text[i:end]
-            
-            # Apply all cleanups
-            chunk = COMBINED_CLEANUP.sub(' ', chunk)
-            
-            # Handle braces in chunk
-            if '{' in chunk or '}' in chunk:
-                for _ in range(2):  # Reduced passes
-                    old_len = len(chunk)
-                    chunk = PATTERNS['braces'].sub(' ', chunk)
-                    if len(chunk) == old_len:
-                        break
-                # Final brace cleanup
-                chunk = chunk.replace('{', ' ').replace('}', ' ')
-            
-            # ASCII conversion if needed
-            if has_non_ascii:
-                # Fast single-pass conversion
-                chunk = chunk.translate(ACCENT_TRANS_SINGLE)
-                for char, replacement in ACCENT_MULTI.items():
-                    if char in chunk:
-                        chunk = chunk.replace(char, replacement)
-                # Always do final ASCII conversion to catch any remaining non-ASCII
-                # (like em-dashes, smart quotes, etc. not in translation tables)
-                chunk = unicodedata.normalize('NFKD', chunk)
-                chunk = chunk.encode('ascii', 'ignore').decode('ascii')
-            
-            # Write processed chunk
-            if i == 0:
-                result.write(chunk)
-            else:
-                # Skip overlap portion
-                result.write(chunk[overlap:])
-        
-        text = result.getvalue()
-        result.close()
-    else:
-        # Small text - process all at once
-        text = COMBINED_CLEANUP.sub(' ', text)
-        
-        # Handle braces
-        if '{' in text or '}' in text:
-            for _ in range(2):
-                old_len = len(text)
-                text = PATTERNS['braces'].sub(' ', text)
-                if len(text) == old_len:
-                    break
-            text = text.replace('{', ' ').replace('}', ' ')
-        
-        # ASCII conversion if needed
-        if has_non_ascii:
-            text = text.translate(ACCENT_TRANS_SINGLE)
-            for char, replacement in ACCENT_MULTI.items():
-                if char in text:
-                    text = text.replace(char, replacement)
-            # Always do final ASCII conversion to catch any remaining non-ASCII
-            text = unicodedata.normalize('NFKD', text)
-            text = text.encode('ascii', 'ignore').decode('ascii')
-    
-    # Final whitespace cleanup - single pass
+    # Final whitespace cleanup - normalize spaces, tabs, and newlines
     text = PATTERNS['spaces'].sub(' ', text.replace('\t', ' ').replace('\n', ' '))
     text = text.strip()
     
     return text
 
 def clean_text_for_inference(text):
-    """Clean text for inference - same as clean_text but preserves curly braces {}.
+    """Clean text for inference - preserves Unicode, URLs, wiki links, brackets, and braces.
     
-    This function is designed for use during inference on benchmark datasets where
-    curly braces may be meaningful (e.g., code snippets, mathematical notation).
-    
-    Differences from clean_text():
-    - Preserves all curly braces {} 
-    - Does not perform recursive brace removal
-    - Otherwise applies identical cleaning (ASCII conversion, whitespace normalization)
+    Since we now preserve all these elements in the main clean_text() function,
+    this is now identical to clean_text(). Kept for backward compatibility.
     
     Args:
         text: Input text to clean
         
     Returns:
-        Cleaned ASCII-only text with curly braces preserved
+        Cleaned text with Unicode, URLs, and wiki links preserved
     """
-    if not text:
-        return ""
-    
-    # Validate input type
-    if not isinstance(text, str):
-        raise TypeError(
-            f"Expected text to be string, got {type(text).__name__}\n"
-            f"Text extraction may have failed"
-        )
-    
-    # Check for redirect/disambiguation (but don't skip cleaning for short texts)
-    # Quick checks without creating substrings
-    first_50 = text[:50] if len(text) > 50 else text
-    if 'REDIRECT' in first_50:
-        return ""
-    if 'may refer to:' in first_50.lower():
-        return ""
-    
-    # Always perform ASCII conversion to ensure complete cleaning
-    has_non_ascii = True  # Always convert to be safe
-    
-    # Single-pass cleanup with inference pattern (no brace removal)
-    # Process in chunks to reduce memory pressure
-    if len(text) > 10000:  # Large text - process in chunks
-        result = StringIO()
-        chunk_size = 5000
-        overlap = 100  # To handle patterns at boundaries
-        
-        for i in range(0, len(text), chunk_size):
-            end = min(i + chunk_size + overlap, len(text))
-            chunk = text[i:end]
-            
-            # Apply cleanups WITHOUT brace removal
-            chunk = COMBINED_CLEANUP_INFERENCE.sub(' ', chunk)
-            
-            # NO brace handling - preserve them as-is
-            
-            # ASCII conversion if needed
-            if has_non_ascii:
-                # Fast single-pass conversion
-                chunk = chunk.translate(ACCENT_TRANS_SINGLE)
-                for char, replacement in ACCENT_MULTI.items():
-                    if char in chunk:
-                        chunk = chunk.replace(char, replacement)
-                # Always do final ASCII conversion to catch any remaining non-ASCII
-                chunk = unicodedata.normalize('NFKD', chunk)
-                chunk = chunk.encode('ascii', 'ignore').decode('ascii')
-            
-            # Write processed chunk
-            if i == 0:
-                result.write(chunk)
-            else:
-                # Skip overlap portion
-                result.write(chunk[overlap:])
-        
-        text = result.getvalue()
-        result.close()
-    else:
-        # Small text - process all at once
-        text = COMBINED_CLEANUP_INFERENCE.sub(' ', text)
-        
-        # NO brace handling - preserve them as-is
-        
-        # ASCII conversion if needed
-        if has_non_ascii:
-            text = text.translate(ACCENT_TRANS_SINGLE)
-            for char, replacement in ACCENT_MULTI.items():
-                if char in text:
-                    text = text.replace(char, replacement)
-            # Always do final ASCII conversion to catch any remaining non-ASCII
-            text = unicodedata.normalize('NFKD', text)
-            text = text.encode('ascii', 'ignore').decode('ascii')
-    
-    # Final whitespace cleanup - single pass
-    text = PATTERNS['spaces'].sub(' ', text.replace('\t', ' ').replace('\n', ' '))
-    text = text.strip()
-    
-    return text
+    return clean_text(text)
 
 def clean_for_tokenizer(text, preserve_braces=True):
     """Convenience wrapper for cleaning text before tokenization.
     
     This is the main entry point for external code that needs to clean text
-    before passing it to the tokenizer during inference.
+    before passing it to the tokenizer.
     
     Args:
         text: Input text to clean
-        preserve_braces: If True (default), preserves curly braces for inference.
-                        If False, removes them as in training data cleaning.
+        preserve_braces: Deprecated parameter, kept for backward compatibility.
+                        Braces are always preserved now.
     
     Returns:
-        Cleaned ASCII-only text ready for tokenization
+        Cleaned text with Unicode, URLs, and wiki links preserved, ready for tokenization
     
     Example:
         >>> from cleaner import clean_for_tokenizer
-        >>> # For inference on benchmarks (preserves braces)
-        >>> clean_text = clean_for_tokenizer("Hello {world}! Çà va?")
-        >>> print(clean_text)  # "Hello {world}! Ca va?"
-        >>> 
-        >>> # For training-style cleaning (removes braces)
-        >>> clean_text = clean_for_tokenizer("Hello {world}!", preserve_braces=False)
-        >>> print(clean_text)  # "Hello  world !"
+        >>> # Unicode, URLs, wiki links, brackets, and braces are all preserved
+        >>> clean_text = clean_for_tokenizer("Check [[Python]] at https://python.org {code}")
+        >>> print(clean_text)  # "Check [[Python]] at https://python.org {code}"
     """
-    if preserve_braces:
-        return clean_text_for_inference(text)
-    else:
-        return clean_text(text)
+    # Parameter preserve_braces is deprecated - always preserve now
+    return clean_text(text)
 
 def process_file_worker(args):
     """Worker function for multiprocessing - processes a single JSONL file."""
@@ -610,7 +383,7 @@ def process_file_worker(args):
     return result
 
 def main():
-    """Process Wikipedia dump files."""
+    """Process Wikipedia dump files preserving Unicode characters."""
     data_dir = Path("/home/andrea/Desktop/data/raw/enwiki_namespace_0")
     output_dir = Path("/home/andrea/Desktop/data/cleaned_articles")
     num_workers = 4
@@ -646,7 +419,7 @@ def main():
     max_articles_per_file = 50000 if test_mode else None  # Reduced for faster testing
     
     print(f"\n{'='*60}")
-    print(f"Wikipedia Cleaner {'(TEST MODE)' if test_mode else '(FULL MODE)'}")
+    print(f"Wikipedia Cleaner - Unicode Preserving {'(TEST MODE)' if test_mode else '(FULL MODE)'}")
     print(f"Files: {len(jsonl_files)}")
     print(f"Workers: {num_workers} parallel processes")
     if test_mode and max_articles_per_file:
