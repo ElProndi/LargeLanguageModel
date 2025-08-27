@@ -163,10 +163,43 @@ class DatasetTokenizer:
         # IMPORTANT: All articles are sent to the tokenizer at once for maximum efficiency.
         # The CodeLlama tokenizer handles internal batching and parallelization.
         print(f"  Sending {len(all_articles):,} articles to tokenizer (all at once)...")
+        
+        # Get EOS token from the tokenizer to append to each article
+        # This ensures proper document boundaries are learned by the model
+        eos_token = self.tokenizer.tokenizer.eos_token  # "</s>"
+        
+        # Append EOS token to each article before encoding
+        # BOS will be added automatically by add_special_tokens=True
+        articles_with_eos = [article + eos_token for article in all_articles]
+        
         # WikipediaTokenizer.encode handles batch encoding internally
-        encoded_batch = self.tokenizer.encode(all_articles, add_special_tokens=True)
+        encoded_batch = self.tokenizer.encode(articles_with_eos, add_special_tokens=True)
         # Convert to list of objects with 'ids' attribute for compatibility
         encodings = [type('Encoding', (), {'ids': ids})() for ids in encoded_batch]
+        
+        # Validation: Check that EOS tokens are present
+        eos_token_id = self.tokenizer.tokenizer.eos_token_id
+        bos_token_id = self.tokenizer.tokenizer.bos_token_id
+        
+        # Sample first few articles to verify special tokens
+        num_to_check = min(5, len(encodings))
+        eos_count = 0
+        bos_count = 0
+        
+        for i in range(num_to_check):
+            if eos_token_id in encodings[i].ids:
+                eos_count += 1
+            if bos_token_id in encodings[i].ids:
+                bos_count += 1
+        
+        print(f"  Special tokens validation (first {num_to_check} articles):")
+        print(f"    BOS tokens found: {bos_count}/{num_to_check}")
+        print(f"    EOS tokens found: {eos_count}/{num_to_check}")
+        
+        if eos_count == 0:
+            print("  ⚠ WARNING: No EOS tokens found! Document boundaries won't be learned properly.")
+        elif eos_count < num_to_check:
+            print(f"  ⚠ WARNING: Only {eos_count}/{num_to_check} articles have EOS tokens.")
         
         # PASS 1: Calculate total sequences needed for pre-allocation
         print(f"  Calculating total sequences for pre-allocation...")

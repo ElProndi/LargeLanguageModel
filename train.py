@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -17,6 +18,7 @@ from torch.utils.data import DataLoader
 from model import create_model
 from dataloader import create_simple_train_val_dataloaders, destroy_dataloaders, get_memory_usage, calculate_dataloader_stats
 from utils import DualLogger, get_cosine_schedule_with_warmup, MetricsTracker
+from tokenizer import WikipediaTokenizer
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision('medium')
@@ -85,6 +87,12 @@ class Trainer:
         print("\nSetting up model...")
         self.model = self._setup_model()
         
+        # Setup tokenizer for visualization during validation
+        print("Loading tokenizer for validation visualization...")
+        self.tokenizer = WikipediaTokenizer()
+        self.tokenizer.load(self.config['paths']['tokenizer_dir'])
+        print(f"Tokenizer loaded: vocab_size={self.tokenizer.vocab_size}")
+        
         # Initialize dataloader variables (will be created dynamically)
         self.train_loader = None
         self.val_loader = None
@@ -97,6 +105,8 @@ class Trainer:
         self.global_step = 0
         self.max_steps = self.config['training']['max_steps']
         self.best_val_loss = float('inf')
+        self.completed_fourths = []  # Track which fourths have been completed
+        self.recent_step_times = deque(maxlen=5)  # Track last 5 step times for ETA calculation
         
         # Get gradient accumulation steps early for correct calculations
         self.gradient_accumulation_steps = self.config['training'].get('gradient_accumulation_steps', 1)
@@ -153,11 +163,23 @@ class Trainer:
         # Set total training steps to max_steps from config
         self.total_training_steps = self.max_steps
         
-        # Validation frequency: every 1000 steps (or less for test mode)
+        # Dynamic step calculation for completing current fourth only
+        if not resume_from:
+            # Starting fresh - calculate steps needed to complete first fourth
+            steps_in_first_fourth = first_fourth_stats['train_batches'] // self.gradient_accumulation_steps
+            if first_fourth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
+                steps_in_first_fourth += 1
+            
+            # Override max_steps to complete only first fourth
+            self.max_steps = steps_in_first_fourth
+            self.total_training_steps = self.max_steps
+            print(f"  • Training will complete first_fourth only: {self.max_steps} steps")
+        
+        # Validation frequency: doubled - every 500 steps (or less for test mode)
         if self.test_mode:
-            self.validation_interval = 50  # Validate every 50 steps in test mode
+            self.validation_interval = 25  # Validate every 25 steps in test mode
         else:
-            self.validation_interval = max(1000, self.max_steps // 10)  # At least every 1000 steps
+            self.validation_interval = max(500, self.max_steps // 20)  # At least every 500 steps
         
         # Setup training components (scheduler needs total_training_steps)
         print(" done.\nSetting up optimizer and scheduler...")
@@ -409,6 +431,9 @@ class Trainer:
         # Use subset of validation data for speed
         max_val_batches = 50 if not self.test_mode else 10
         
+        # Flag to track if we've shown visualization
+        visualization_shown = False
+        
         for i, batch in enumerate(self.val_loader):
             if i >= max_val_batches:
                 break
@@ -426,6 +451,67 @@ class Trainer:
             # Forward pass
             outputs = self.model(input_ids=batch, labels=batch)
             loss = outputs['loss']
+            
+            # Visualization: Show model predictions for first batch only
+            if i == 0 and not visualization_shown:
+                visualization_shown = True
+                print("\n" + "="*80)
+                print("📊 MODEL PREDICTION VISUALIZATION (First validation sequence)")
+                print("="*80)
+                
+                # Get the first sequence from the batch
+                input_sequence = batch[0]  # Shape: [512]
+                
+                # Get model predictions
+                logits = outputs['logits'][0]  # Shape: [512, vocab_size]
+                predicted_tokens = torch.argmax(logits, dim=-1)  # Shape: [512]
+                
+                # For language modeling, predictions are for the NEXT token
+                # So predicted_tokens[i] is the prediction for what comes after input_sequence[i]
+                
+                # Decode tokens to text
+                # Input: positions 0-511
+                # Predictions: what comes after positions 0-511 (so predictions for positions 1-512)
+                input_text = self.tokenizer.decode(input_sequence.cpu().tolist(), skip_special_tokens=False)
+                
+                # For display, we'll show:
+                # - Input tokens 0-510 (all but last)
+                # - Target tokens 1-511 (what should come next)
+                # - Predicted tokens for positions 1-511
+                input_display = input_sequence[:-1].cpu().tolist()  # Tokens 0-510
+                target_display = input_sequence[1:].cpu().tolist()  # Tokens 1-511 (targets)
+                predicted_display = predicted_tokens[:-1].cpu().tolist()  # Predictions for 1-511
+                
+                # Decode for display
+                input_text_display = self.tokenizer.decode(input_display, skip_special_tokens=False)
+                target_text_display = self.tokenizer.decode(target_display, skip_special_tokens=False)
+                predicted_text_display = self.tokenizer.decode(predicted_display, skip_special_tokens=False)
+                
+                # Truncate for terminal display
+                max_display_chars = 300
+                if len(input_text_display) > max_display_chars:
+                    input_text_display = input_text_display[:max_display_chars] + "..."
+                if len(target_text_display) > max_display_chars:
+                    target_text_display = target_text_display[:max_display_chars] + "..."
+                if len(predicted_text_display) > max_display_chars:
+                    predicted_text_display = predicted_text_display[:max_display_chars] + "..."
+                
+                print(f"\n📝 INPUT TEXT (tokens 0-510):")
+                print(f"   {input_text_display}")
+                
+                print(f"\n🎯 TARGET TEXT (tokens 1-511 - what should come next):")
+                print(f"   {target_text_display}")
+                
+                print(f"\n🤖 PREDICTED TEXT (model's predictions for tokens 1-511):")
+                print(f"   {predicted_text_display}")
+                
+                # Calculate accuracy for this sequence
+                import numpy as np
+                correct_predictions = np.sum(np.array(predicted_display) == np.array(target_display))
+                accuracy = correct_predictions / len(predicted_display) * 100
+                
+                print(f"\n📈 Sequence Accuracy: {accuracy:.1f}% ({correct_predictions}/{len(predicted_display)} tokens)")
+                print("="*80 + "\n")
             
             # Accumulate metrics - use .item() to detach from computation graph
             # This ensures we only keep the scalar value, not the tensor
@@ -468,6 +554,7 @@ class Trainer:
         checkpoint = {
             'global_step': self.global_step,
             'current_data_subset': self.current_data_subset,  # Save which subset we're on
+            'completed_fourths': self.completed_fourths,  # Save completed fourths list
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
@@ -566,12 +653,50 @@ class Trainer:
         self.global_step = checkpoint['global_step']
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         
+        # Restore completed fourths list
+        self.completed_fourths = checkpoint.get('completed_fourths', [])
+        
+        # Clear step times for fresh ETA calculation after resume
+        self.recent_step_times.clear()
+        
         # Restore data subset state if available
         saved_subset = checkpoint.get('current_data_subset', 'first_fourth')
         
-        print(f"  Resumed from step {self.global_step}/{self.max_steps}")
+        # Check if current fourth is already complete and move to next if needed
+        data_fourths = ['first_fourth', 'second_fourth', 'third_fourth', 'fourth_fourth']
+        if saved_subset in self.completed_fourths:
+            current_idx = data_fourths.index(saved_subset)
+            if current_idx < len(data_fourths) - 1:
+                next_subset = data_fourths[current_idx + 1]
+                print(f"  {saved_subset} already complete, moving to {next_subset}")
+                saved_subset = next_subset
+            else:
+                print(f"  All fourths completed! Training is finished.")
+                saved_subset = 'fourth_fourth'  # Stay on last fourth
+        
+        # Calculate steps needed to complete the current fourth
+        from dataloader import calculate_dataloader_stats
+        current_fourth_stats = calculate_dataloader_stats(
+            batch_size=self.config['training']['batch_size'],
+            val_split=0.1,
+            test_mode=self.test_mode,
+            file_subset=saved_subset
+        )
+        
+        steps_in_current_fourth = current_fourth_stats['train_batches'] // self.gradient_accumulation_steps
+        if current_fourth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
+            steps_in_current_fourth += 1
+        
+        # Set max_steps to complete current fourth
+        self.max_steps = self.global_step + steps_in_current_fourth
+        self.total_training_steps = self.max_steps
+        
+        print(f"  Resumed from step {self.global_step}")
         print(f"  Best validation loss: {self.best_val_loss:.4f}")
         print(f"  Data subset: {saved_subset}")
+        print(f"  Completed fourths: {self.completed_fourths}")
+        print(f"  Will complete {saved_subset}: {steps_in_current_fourth} more steps")
+        print(f"  New max_steps: {self.max_steps}")
         
         # Load the appropriate data subset
         if saved_subset:
@@ -613,6 +738,11 @@ class Trainer:
                     # Check if we've reached max_steps before processing new fourth
                     if self.global_step >= self.max_steps:
                         break
+                    
+                    # Skip already completed fourths
+                    if data_fourth in self.completed_fourths:
+                        print(f"Skipping already completed {data_fourth}")
+                        continue
                     
                     # Load the appropriate data subset
                     if self.current_data_subset != data_fourth:
@@ -683,13 +813,42 @@ class Trainer:
                             # Calculate tokens per second based on REAL total time for all accumulated batches
                             tokens_per_second = accumulated_tokens / iteration_time if iteration_time > 0 else 0
                             
-                            # Print step metrics with data subset indicator
+                            # Update step times for ETA calculation
+                            self.recent_step_times.append(iteration_time)
+                            
+                            # Calculate ETA based on running average of recent step times
+                            eta_str = ""
+                            if len(self.recent_step_times) >= 1:  # Start showing ETA immediately
+                                # Calculate average time per step
+                                avg_step_time = sum(self.recent_step_times) / len(self.recent_step_times)
+                                
+                                # Calculate remaining steps for current fourth
+                                remaining_steps = self.max_steps - self.global_step
+                                
+                                if remaining_steps > 0:
+                                    # Calculate ETA in seconds
+                                    eta_seconds = avg_step_time * remaining_steps
+                                    
+                                    # Format ETA as HH:MM:SS or MM:SS
+                                    if eta_seconds < 3600:  # Less than 1 hour
+                                        eta_minutes = int(eta_seconds // 60)
+                                        eta_secs = int(eta_seconds % 60)
+                                        eta_str = f" | ETA: {eta_minutes:02d}:{eta_secs:02d}"
+                                    else:  # 1 hour or more
+                                        eta_hours = int(eta_seconds // 3600)
+                                        eta_minutes = int((eta_seconds % 3600) // 60)
+                                        eta_secs = int(eta_seconds % 60)
+                                        eta_str = f" | ETA: {eta_hours:02d}:{eta_minutes:02d}:{eta_secs:02d}"
+                                else:
+                                    eta_str = " | ETA: Complete"
+                            
+                            # Print step metrics with data subset indicator and ETA
                             # Time shown is TOTAL time for all gradient accumulation steps
                             print(f"[{data_fourth:12s}] Step {self.global_step:5d}/{self.total_training_steps} | "
                                   f"{iteration_time * 1000:6.0f}ms | "
                                   f"Loss: {avg_loss:7.4f} | "
                                   f"PPL: {perplexity:8.2f} | "
-                                  f"Tokens/s: {tokens_per_second:8.0f}")
+                                  f"Tokens/s: {tokens_per_second:8.0f}{eta_str}")
                             
                             # Logging to tensorboard/files
                             if self.global_step % self.config['logging']['logging_steps'] == 0:
@@ -736,9 +895,25 @@ class Trainer:
                             accumulation_counter = 0
                             accumulated_loss = 0.0
                             accumulated_tokens = 0
+                    
+                    # After processing all batches in this fourth, mark it as complete
+                    if data_fourth not in self.completed_fourths:
+                        self.completed_fourths.append(data_fourth)
+                        print(f"\n✓ Completed {data_fourth}")
+                        print(f"Saving checkpoint after completing {data_fourth}...")
+                        self.save_checkpoint(f"checkpoint_{data_fourth}_complete.pt")
+                        
+                        # Check if we've completed all fourths
+                        if len(self.completed_fourths) == 4:
+                            print(f"\n🎉 All fourths completed! Training finished.")
+                            break
                 
-                # Reset to first_fourth after completing all fourths
-                current_fourth_idx = 0
+                # Check if we should stop after completing current fourth
+                if self.global_step >= self.max_steps:
+                    print(f"\nCompleted current fourth. Stopping training.")
+                    break
+                    
+                # Don't reset to first_fourth - training stops after current fourth
         
         except KeyboardInterrupt:
             print("\n\nTraining interrupted by user")

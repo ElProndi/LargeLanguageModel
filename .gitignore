@@ -11,6 +11,8 @@ __pycache__/
 tokenizers/
 logs/
 checkpoints/
+benchmark_cache/
+benchmark_results/
 
 # Python egg files
 *.egg-info/

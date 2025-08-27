@@ -575,6 +575,12 @@ if __name__ == "__main__":
     print("Model Parameter Breakdown")
     print("="*60)
     
+    # Calculate attention head size
+    config = model.config
+    head_size = config['hidden_size'] // config['num_heads']
+    print(f"\n🎯 Attention Head Size: {head_size} dimensions")
+    print(f"   (hidden_size={config['hidden_size']} / num_heads={config['num_heads']})")
+    
     print("\n📦 Embeddings")
     print(f"   ├── Token Embeddings:       {params['embedding']:>12,} params")
     print(f"   └── Position Embeddings:    {params['positional']:>12,} params")
