@@ -297,18 +297,35 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
     
     # Create model using config from checkpoint
     print_info("Creating model architecture from checkpoint config...")
+    
+    # Extract model config
+    model_config = config['model']
+    tokenizer_config = config.get('tokenizer', {})
+    rope_config = config.get('rope', {})
+    
+    # Create model with all architecture parameters from config
     model = TransformerLM(
-        vocab_size=config['model']['vocab_size'],
-        hidden_size=config['model']['hidden_size'],
-        num_layers=config['model']['num_layers'],
-        num_heads=config['model']['num_heads'],
-        max_position_embeddings=config['model']['max_position_embeddings'],
-        dropout=0.0,  # Disable dropout for inference
-        attention_dropout=0.0,  # Disable attention dropout for inference
-        layer_norm_eps=config['model']['layer_norm_eps'],
-        initializer_range=config['model']['initializer_range'],
-        use_cache=config['model']['use_cache'],
-        pad_token_id=config['tokenizer'].get('pad_token_id', 3)
+        vocab_size=model_config['vocab_size'],
+        hidden_size=model_config['hidden_size'],
+        num_layers=model_config['num_layers'],
+        num_heads=model_config['num_heads'],
+        # CRITICAL: Pass num_kv_heads to match trained model architecture
+        num_kv_heads=model_config.get('num_kv_heads', model_config['num_heads']),
+        # Pass modern architecture flags
+        use_rms_norm=model_config.get('use_rms_norm', True),
+        use_swiglu=model_config.get('use_swiglu', True),
+        max_position_embeddings=model_config['max_position_embeddings'],
+        # RoPE configuration
+        rope_theta=rope_config.get('theta', 10000.0),
+        rope_scaling=rope_config.get('scaling_factor', 1.0),
+        force_flash_attention=model_config.get('force_flash_attention', True),
+        # Disable dropout for inference
+        dropout=0.0,
+        attention_dropout=0.0,
+        layer_norm_eps=model_config['layer_norm_eps'],
+        initializer_range=model_config['initializer_range'],
+        use_cache=model_config['use_cache'],
+        pad_token_id=tokenizer_config.get('pad_token_id', 2)
     )
     
     # Handle compiled model state dict (remove "_orig_mod." prefix if present)
