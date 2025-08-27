@@ -427,19 +427,29 @@ class Trainer:
             outputs = self.model(input_ids=batch, labels=batch)
             loss = outputs['loss']
             
-            # Accumulate metrics
+            # Accumulate metrics - use .item() to detach from computation graph
+            # This ensures we only keep the scalar value, not the tensor
             total_loss += loss.item() * batch.size(0)
             total_tokens += batch.numel()
             num_batches += 1
+            
+            # Explicitly delete GPU tensors to free memory immediately
+            del outputs  # Delete the entire outputs dictionary
+            del loss     # Delete the loss tensor
+            del batch    # Delete the GPU batch tensor
         
         # Calculate average metrics
-        avg_loss = total_loss / (num_batches * batch.size(0))
+        batch_size = self.config['training']['batch_size']
+        avg_loss = total_loss / (num_batches * batch_size)
         perplexity = self.metrics.calculate_perplexity(avg_loss)
         
         metrics = {
             'val_loss': avg_loss,
             'val_perplexity': perplexity
         }
+        
+        # Clear GPU cache to release any remaining memory
+        torch.cuda.empty_cache()
         
         return metrics
     
@@ -713,6 +723,10 @@ class Trainer:
                                 
                                 # Save checkpoint after each validation
                                 self.save_checkpoint()
+                                
+                                # Additional GPU memory cleanup after validation
+                                # This ensures any remaining cached memory is fully released
+                                torch.cuda.empty_cache()
                             
                             # Regular checkpoint saving
                             if self.global_step % self.config['logging']['save_steps'] == 0:

@@ -16,6 +16,7 @@ import numpy as np
 # Import project modules
 from model import TransformerLM
 from tokenizer import WikipediaTokenizer
+from benchmark import ModelBenchmark, format_benchmark_results, save_benchmark_results
 
 
 # ANSI color codes for terminal output
@@ -672,20 +673,21 @@ def main():
     print(f"\n{Colors.BOLD}Select Inference Mode:{Colors.ENDC}")
     print("  1. Single model inference")
     print("  2. Multi-model comparison")
+    print("  3. Benchmark models")
     print("  0. Exit")
     
     while True:
         try:
-            mode_choice = input(f"\n{Colors.BOLD}Select mode (0-2): {Colors.ENDC}")
+            mode_choice = input(f"\n{Colors.BOLD}Select mode (0-3): {Colors.ENDC}")
             mode_choice = int(mode_choice)
             
             if mode_choice == 0:
                 print_info("Exiting...")
                 sys.exit(0)
-            elif mode_choice in [1, 2]:
+            elif mode_choice in [1, 2, 3]:
                 break
             else:
-                print_warning("Please enter 0, 1, or 2")
+                print_warning("Please enter 0, 1, 2, or 3")
         except ValueError:
             print_warning("Invalid input. Please enter a number.")
     
@@ -768,6 +770,52 @@ def main():
         # Run multi-model inference loop
         run_multi_model_inference(models_dict, device)
     
+    elif mode_choice == 3:
+        # Benchmark mode
+        checkpoint_paths = select_multiple_checkpoints(run_dir)
+        if checkpoint_paths is None or len(checkpoint_paths) == 0:
+            print_info("No checkpoints selected. Exiting.")
+            sys.exit(0)
+        
+        # Memory warning for multiple models
+        estimated_memory_per_model = 0.1  # ~100MB per model
+        estimated_total_memory = len(checkpoint_paths) * estimated_memory_per_model
+        
+        if device.type == 'cuda':
+            available_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+            if estimated_total_memory > available_memory * 0.8:
+                print_warning(f"Selected {len(checkpoint_paths)} models (~{estimated_total_memory:.1f}GB)")
+                print_warning(f"Available GPU memory: {available_memory:.1f}GB")
+                print_warning("This may exceed available memory!")
+                confirm = input(f"\n{Colors.BOLD}Continue anyway? (y/n): {Colors.ENDC}")
+                if confirm.lower() != 'y':
+                    print_info("Model loading cancelled.")
+                    sys.exit(0)
+        else:
+            if len(checkpoint_paths) > 3:
+                print_warning(f"Loading {len(checkpoint_paths)} models on CPU for benchmarking may be slow.")
+                confirm = input(f"\n{Colors.BOLD}Continue? (y/n): {Colors.ENDC}")
+                if confirm.lower() != 'y':
+                    print_info("Model loading cancelled.")
+                    sys.exit(0)
+        
+        # Load multiple models for benchmarking
+        print(f"\n{Colors.BOLD}Loading Models for Benchmarking...{Colors.ENDC}")
+        try:
+            models_dict, total_memory = load_multiple_models(checkpoint_paths, device)
+            if models_dict is None:
+                print_error("Failed to load any models. Exiting.")
+                sys.exit(1)
+        except Exception as e:
+            print_error(f"Failed to load models: {e}")
+            if "out of memory" in str(e).lower():
+                print_warning("Try selecting fewer models or using CPU instead.")
+            sys.exit(1)
+        
+        print_success(f"Successfully loaded {len(models_dict)} models for benchmarking!")
+        
+        # Run benchmark evaluation
+        run_benchmark_mode(models_dict, device)
 
 
 def run_single_model_inference(model: TransformerLM, tokenizer: WikipediaTokenizer, device: torch.device):
@@ -854,6 +902,109 @@ def run_single_model_inference(model: TransformerLM, tokenizer: WikipediaTokeniz
 
 
 
+
+
+def run_benchmark_mode(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], device: torch.device):
+    """Run comprehensive benchmarks on selected models."""
+    print(f"\n{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
+    print(f"{Colors.CYAN}Starting benchmark evaluation...{Colors.ENDC}")
+    print(f"{Colors.CYAN}{len(models_dict)} models loaded for benchmarking{Colors.ENDC}")
+    print(f"{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
+    
+    # Configure benchmark
+    print(f"\n{Colors.BOLD}Configure Benchmark:{Colors.ENDC}")
+    print("  1. Quick benchmark (fewer samples, faster)")
+    print("  2. Standard benchmark (recommended)")
+    print("  3. Comprehensive benchmark (more samples, slower)")
+    
+    while True:
+        try:
+            bench_choice = input(f"\n{Colors.BOLD}Select configuration (1-3): {Colors.ENDC}")
+            bench_choice = int(bench_choice)
+            
+            if bench_choice == 1:
+                config = {
+                    'wikitext_samples': 50,
+                    'lambada_samples': 20,
+                    'hellaswag_samples': 10,
+                    'max_length': 512,
+                    'max_new_tokens': 20
+                }
+                print_info("Using quick benchmark configuration")
+                break
+            elif bench_choice == 2:
+                config = {
+                    'wikitext_samples': 100,
+                    'lambada_samples': 50,
+                    'hellaswag_samples': 20,
+                    'max_length': 512,
+                    'max_new_tokens': 30
+                }
+                print_info("Using standard benchmark configuration")
+                break
+            elif bench_choice == 3:
+                config = {
+                    'wikitext_samples': 200,
+                    'lambada_samples': 100,
+                    'hellaswag_samples': 40,
+                    'max_length': 512,
+                    'max_new_tokens': 40
+                }
+                print_info("Using comprehensive benchmark configuration")
+                break
+            else:
+                print_warning("Please enter 1, 2, or 3")
+        except ValueError:
+            print_warning("Invalid input. Please enter a number.")
+    
+    # Run benchmarks
+    print(f"\n{Colors.BOLD}Running Benchmarks...{Colors.ENDC}")
+    print_warning("This may take several minutes depending on the configuration.")
+    
+    try:
+        benchmark = ModelBenchmark(device)
+        results = benchmark.run_full_benchmark(models_dict, config)
+        
+        # Display results
+        print("\n" + format_benchmark_results(results))
+        
+        # Save results
+        save_benchmark_results(results)
+        
+        print_success("\nBenchmark completed successfully!")
+        
+        # Ask if user wants to see detailed results
+        print(f"\n{Colors.BOLD}Options:{Colors.ENDC}")
+        print("  1. View detailed results per model")
+        print("  2. Return to main menu")
+        
+        detail_choice = input(f"\n{Colors.BOLD}Select option (1-2): {Colors.ENDC}")
+        
+        if detail_choice == '1':
+            for model_name, model_results in results.items():
+                print(f"\n{Colors.BLUE}{'='*60}{Colors.ENDC}")
+                print(f"{Colors.BLUE}Detailed Results for: {model_name}{Colors.ENDC}")
+                print(f"{Colors.BLUE}{'='*60}{Colors.ENDC}")
+                for metric, value in model_results.items():
+                    if metric != 'error':
+                        if isinstance(value, float):
+                            if 'acc' in metric:
+                                print(f"  {metric}: {value:.2f}%")
+                            else:
+                                print(f"  {metric}: {value:.4f}")
+                        else:
+                            print(f"  {metric}: {value}")
+        
+    except Exception as e:
+        print_error(f"Benchmark failed: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    finally:
+        # Cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print_info("GPU cache cleared")
 
 
 def run_multi_model_inference(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], device: torch.device):

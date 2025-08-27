@@ -471,9 +471,32 @@ class TransformerLM(nn.Module):
         # Positional embeddings
         positional_params = self.position_embeddings.weight.numel()
         
-        # Transformer layers
-        transformer_params = sum(p.numel() for name, p in self.named_parameters() 
-                               if 'transformer' in name)
+        # Calculate parameters for a single transformer block
+        hidden_size = self.config['hidden_size']
+        intermediate_size = self.config['intermediate_size']
+        
+        # Attention module parameters
+        qkv_proj_params = hidden_size * (3 * hidden_size)  # QKV projection
+        o_proj_params = hidden_size * hidden_size  # Output projection
+        attention_params = qkv_proj_params + o_proj_params
+        
+        # Feed-forward network parameters
+        fc1_params = hidden_size * intermediate_size
+        fc2_params = intermediate_size * hidden_size
+        ffn_params = fc1_params + fc2_params
+        
+        # LayerNorm parameters (2 per block: norm1 and norm2)
+        layernorm_params_per = hidden_size * 2  # weight + bias
+        layernorm_params = layernorm_params_per * 2  # norm1 + norm2
+        
+        # Total for single block
+        single_block_params = attention_params + ffn_params + layernorm_params
+        
+        # All transformer layers
+        num_layers = self.config['num_layers']
+        all_blocks_params = single_block_params * num_layers
+        final_norm_params = hidden_size * 2  # Final LayerNorm
+        transformer_params = all_blocks_params + final_norm_params
         
         # Total unique parameters (excluding tied weights)
         total_params = sum(p.numel() for p in self.parameters())
@@ -482,9 +505,16 @@ class TransformerLM(nn.Module):
         return {
             'embedding': embedding_params,
             'positional': positional_params,
+            'attention_per_block': attention_params,
+            'ffn_per_block': ffn_params,
+            'layernorm_per_block': layernorm_params,
+            'single_block': single_block_params,
+            'all_blocks': all_blocks_params,
+            'final_norm': final_norm_params,
             'transformer': transformer_params,
             'total': total_params,
-            'trainable': trainable_params
+            'trainable': trainable_params,
+            'num_layers': num_layers
         }
 
 
@@ -538,6 +568,41 @@ def create_model(config_path: str = "config.json") -> TransformerLM:
 if __name__ == "__main__":
     # Test model creation
     model = create_model()
+    
+    # Display detailed parameter breakdown
+    params = model.get_num_params()
+    print("\n" + "="*60)
+    print("Model Parameter Breakdown")
+    print("="*60)
+    
+    print("\n📦 Embeddings")
+    print(f"   ├── Token Embeddings:       {params['embedding']:>12,} params")
+    print(f"   └── Position Embeddings:    {params['positional']:>12,} params")
+    print(f"   Total Embeddings:           {params['embedding'] + params['positional']:>12,} params")
+    
+    print("\n🔧 Single Transformer Block")
+    print(f"   ├── Attention (QKV + O_proj): {params['attention_per_block']:>11,} params")
+    print(f"   ├── Feed-Forward Network:     {params['ffn_per_block']:>11,} params")
+    print(f"   └── LayerNorms (2x):          {params['layernorm_per_block']:>11,} params")
+    print(f"   Total per block:              {params['single_block']:>11,} params")
+    
+    print(f"\n🏗️  All Transformer Layers ({params['num_layers']} blocks)")
+    print(f"   ├── {params['num_layers']} × Transformer Blocks: {params['all_blocks']:>11,} params")
+    print(f"   └── Final LayerNorm:          {params['final_norm']:>11,} params")
+    print(f"   Total Transformer:            {params['transformer']:>11,} params")
+    
+    print("\n" + "="*60)
+    print(f"🎯 Total Model Parameters:      {params['total']:>11,} params")
+    print(f"   Trainable Parameters:        {params['trainable']:>11,} params")
+    print("="*60)
+    
+    # Calculate percentages
+    print("\n📊 Parameter Distribution")
+    print(f"   Embeddings:      {(params['embedding'] + params['positional']) / params['total'] * 100:>5.1f}%")
+    print(f"   Transformer:     {params['transformer'] / params['total'] * 100:>5.1f}%")
+    print(f"     - Attention:   {(params['attention_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
+    print(f"     - FFN:         {(params['ffn_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
+    print("\n" + "="*60)
     
     # Get model device for creating test inputs
     device = next(model.parameters()).device
