@@ -228,7 +228,7 @@ class TransformerLM(nn.Module):
         layer_norm_eps: float = 1e-5,
         initializer_range: float = 0.02,
         use_cache: bool = True,
-        pad_token_id: int = 3
+        pad_token_id: int = 2
     ):
         super().__init__()
         
@@ -524,7 +524,7 @@ def create_model(config_path: str = "config.json") -> TransformerLM:
         layer_norm_eps=model_config['layer_norm_eps'],
         initializer_range=model_config['initializer_range'],
         use_cache=model_config['use_cache'],
-        pad_token_id=tokenizer_config.get('pad_token_id', 3)
+        pad_token_id=tokenizer_config.get('pad_token_id', 2)
     )
     
     # Get parameter count for logging
@@ -543,7 +543,7 @@ if __name__ == "__main__":
     device = next(model.parameters()).device
     
     # Test forward pass with dummy input
-    dummy_input = torch.randint(0, 16384, (2, 128), device=device)  # batch_size=2, seq_len=128
+    dummy_input = torch.randint(0, 32016, (2, 128), device=device)  # batch_size=2, seq_len=128
     print(f"\nTesting forward pass with input shape: {dummy_input.shape}")
     print(f"Input device: {dummy_input.device}")
     
@@ -553,7 +553,7 @@ if __name__ == "__main__":
     
     # Test generation
     print(f"\nTesting generation...")
-    prompt = torch.randint(0, 16384, (1, 10), device=device)  # Single prompt of 10 tokens
+    prompt = torch.randint(0, 32016, (1, 10), device=device)  # Single prompt of 10 tokens
     generated = model.generate(prompt, max_length=50, temperature=0.8, top_k=50)
     print(f"Generated shape: {generated.shape}")
     

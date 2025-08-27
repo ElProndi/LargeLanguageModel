@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Iterator, List, Tuple, Dict, Any
 import numpy as np
 import orjson
-from tokenizers import Tokenizer
 from numpy.lib.stride_tricks import as_strided
+from tokenizer import WikipediaTokenizer
 
 
 class DatasetTokenizer:
@@ -31,35 +31,28 @@ class DatasetTokenizer:
         self.total_sequences = 0
         
     def load_tokenizer(self, test_mode: bool = False):
-        """Load trained tokenizer from disk.
+        """Load CodeLlama tokenizer.
         
         Args:
-            test_mode: If True, load test tokenizer (256 vocab), else full (16384)
+            test_mode: Ignored - always uses full CodeLlama tokenizer
         """
-        tokenizer_path = Path("tokenizers")
-        if test_mode:
-            load_path = tokenizer_path / "test_tokenizer" / "tokenizer.json"
-            metadata_path = tokenizer_path / "test_tokenizer" / "metadata.json"
+        tokenizer_path = Path("tokenizers/codellama_tokenizer")
+        
+        # Create WikipediaTokenizer instance (wrapper for CodeLlama)
+        self.tokenizer = WikipediaTokenizer()
+        
+        # Try to load saved tokenizer first, otherwise download
+        if tokenizer_path.exists():
+            print(f"Loading tokenizer from {tokenizer_path}")
+            self.tokenizer.load(str(tokenizer_path))
         else:
-            load_path = tokenizer_path / "full_tokenizer" / "tokenizer.json"
-            metadata_path = tokenizer_path / "full_tokenizer" / "metadata.json"
+            print("Downloading CodeLlama tokenizer from HuggingFace...")
+            self.tokenizer.train()  # This actually downloads the pre-trained tokenizer
+            self.tokenizer.save(str(tokenizer_path))
         
-        if not load_path.exists():
-            raise FileNotFoundError(
-                f"Tokenizer not found at {load_path}. "
-                f"Please run tokenizer.py {'--test' if test_mode else ''} first."
-            )
+        self.vocab_size = self.tokenizer.get_vocab_size()
         
-        # Load tokenizer
-        self.tokenizer = Tokenizer.from_file(str(load_path))
-        
-        # Load metadata
-        if metadata_path.exists():
-            with open(metadata_path, 'rb') as f:
-                metadata = orjson.loads(f.read())
-                self.vocab_size = metadata["actual_vocab_size"]
-        
-        print(f"Loaded {'test' if test_mode else 'full'} tokenizer")
+        print(f"Loaded CodeLlama tokenizer")
         print(f"Vocabulary size: {self.vocab_size}")
     
     def calculate_num_sequences(self, token_lengths: List[int]) -> int:
@@ -168,9 +161,12 @@ class DatasetTokenizer:
         all_articles = self.read_all_articles(file_path, max_articles)
         
         # IMPORTANT: All articles are sent to the tokenizer at once for maximum efficiency.
-        # The Hugging Face tokenizer handles internal batching and parallelization.
+        # The CodeLlama tokenizer handles internal batching and parallelization.
         print(f"  Sending {len(all_articles):,} articles to tokenizer (all at once)...")
-        encodings = self.tokenizer.encode_batch(all_articles, add_special_tokens=True)
+        # WikipediaTokenizer.encode handles batch encoding internally
+        encoded_batch = self.tokenizer.encode(all_articles, add_special_tokens=True)
+        # Convert to list of objects with 'ids' attribute for compatibility
+        encodings = [type('Encoding', (), {'ids': ids})() for ids in encoded_batch]
         
         # PASS 1: Calculate total sequences needed for pre-allocation
         print(f"  Calculating total sequences for pre-allocation...")
@@ -249,10 +245,10 @@ class DatasetTokenizer:
         cleaned_dir = data_dir / "cleaned_articles"
         
         if test_mode:
-            output_dir = data_dir / "tokenized_datasets" / "test_dataset"
+            output_dir = data_dir / "tokenized_datasets" / "codellama_test_dataset"
             files = [cleaned_dir / "cleaned_0.txt"]
         else:
-            output_dir = data_dir / "tokenized_datasets" / "full_dataset"
+            output_dir = data_dir / "tokenized_datasets" / "codellama_full_dataset"
             files = sorted(cleaned_dir.glob("cleaned_*.txt"))
         
         # Create output directory

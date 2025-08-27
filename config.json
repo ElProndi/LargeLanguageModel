@@ -1,6 +1,6 @@
 {
   "model": {
-    "vocab_size": 16384,
+    "vocab_size": 32016,
     "hidden_size": 512,
     "num_layers": 32,
     "num_heads": 16,
@@ -13,10 +13,10 @@
   },
   
   "tokenizer": {
-    "bos_token_id": 0,
-    "eos_token_id": 1,
-    "unk_token_id": 2,
-    "pad_token_id": 3
+    "bos_token_id": 1,
+    "eos_token_id": 2,
+    "unk_token_id": 0,
+    "pad_token_id": 2
   },
   
   "training": {
@@ -40,7 +40,7 @@
   "paths": {
     "checkpoint_dir": "checkpoints",
     "log_dir": "logs",
-    "tokenizer_dir": "tokenizers/full_tokenizer",
-    "dataset_dir": "/home/andrea/Desktop/data/tokenized_datasets/full_dataset"
+    "tokenizer_dir": "tokenizers/codellama_tokenizer",
+    "dataset_dir": "/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset"
   }
 }

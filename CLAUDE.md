@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with the LLM training pi
 
 ## Project Overview
 
-A from-scratch implementation of a transformer-based language model training pipeline, designed for efficiency and clarity. The pipeline processes Wikipedia data to train a custom language model using modern best practices.
+A transformer-based language model training pipeline leveraging the pre-trained CodeLlama tokenizer for superior text and code representation. The pipeline processes Wikipedia data to train language models using modern best practices and state-of-the-art tokenization.
 
 ## Directory Structure
 
@@ -13,7 +13,7 @@ LargeLanguageModel/
 ├── CLAUDE.md              # This file - project guidance
 ├── config.json            # Centralized configuration for entire pipeline
 ├── cleaner.py             # Wikipedia data extraction and cleaning
-├── tokenizer.py           # BPE tokenizer training with Hugging Face
+├── tokenizer.py           # CodeLlama tokenizer wrapper from HuggingFace
 ├── dataset_prep.py        # Dataset tokenization with sliding windows
 ├── dataloader.py          # PyTorch DataLoader for efficient training
 ├── model.py               # Transformer language model architecture
@@ -25,12 +25,13 @@ LargeLanguageModel/
 │   ├── metrics.py         # Metrics tracking and smoothing
 │   └── scheduler.py       # Learning rate scheduling
 ├── tokenizers/            # Saved tokenizer models
-│   ├── test_tokenizer/    # Test mode tokenizer (256 vocab)
-│   └── full_tokenizer/    # Full tokenizer (16384 vocab)
-├── checkpoints/           # Model checkpoints
-│   ├── checkpoint_latest.pt    # Most recent checkpoint
-│   ├── checkpoint_best.pt      # Best validation loss
-│   └── checkpoint_step_*.pt    # Step-based checkpoints
+│   └── codellama_tokenizer/  # CodeLlama tokenizer (32016 vocab)
+├── checkpoints/           # Model checkpoints (hierarchical structure)
+│   ├── run_2024_12_15_14_30/  # Training run directory (timestamp-based)
+│   │   ├── checkpoint_latest.pt    # Most recent checkpoint
+│   │   ├── checkpoint_best.pt      # Best validation loss
+│   │   └── checkpoint_step_*.pt    # Step-based checkpoints
+│   └── [legacy flat structure]     # Old format: checkpoints directly in base dir
 └── logs/                  # Training logs
     ├── tensorboard/       # TensorBoard event files
     └── raw_metrics/       # Raw JSON metrics for analysis
@@ -44,15 +45,15 @@ Desktop/
 │   ├── raw/                # Raw Wikipedia JSONL files
 │   │   └── enwiki_namespace_0/
 │   │       └── *.jsonl     # 38 Wikipedia dump files (50GB+)
-│   ├── cleaned_articles/   # Processed ASCII text
+│   ├── cleaned_articles/   # Processed text (Unicode preserved)
 │   │   └── cleaned_*.txt   # One article per line format
 │   └── tokenized_datasets/ # Tokenized sequences for training
-│       ├── test_dataset/   # Test mode output
-│       │   ├── tokens_*.npy    # NumPy arrays of token sequences
-│       │   └── metadata.json   # Dataset statistics
-│       └── full_dataset/   # Full dataset output
-│           ├── tokens_*.npy    # NumPy arrays (38 files)
-│           └── metadata.json   # Overall statistics
+│       ├── codellama_test_dataset/  # Test mode output with CodeLlama
+│       │   ├── tokens_*.npy         # NumPy arrays of token sequences
+│       │   └── metadata.json        # Dataset statistics
+│       └── codellama_full_dataset/  # Full dataset with CodeLlama
+│           ├── tokens_*.npy         # NumPy arrays (38 files)
+│           └── metadata.json        # Overall statistics
 └── LargeLanguageModel/     # Active development directory
 ```
 
@@ -64,7 +65,7 @@ Desktop/
 **Key Features**:
 - Processes 38 Wikipedia JSONL files sequentially
 - Extracts article text from nested JSON structure
-- Cleans text to pure ASCII for consistent tokenization
+- Cleans text preserving Unicode characters for richer representation
 - Removes metadata, references, and formatting artifacts
 - Implements efficient streaming processing with minimal memory footprint
 
@@ -77,32 +78,34 @@ Desktop/
 - Output format: One complete article per line
 
 ### Phase 2: Tokenization (tokenizer.py)
-**Purpose**: Train custom BPE tokenizer on Wikipedia corpus for optimal compression
+**Purpose**: Use pre-trained CodeLlama tokenizer for superior text and code representation
 
 **Key Features**:
-- ByteLevel BPE tokenization preserving all ASCII characters
-- Configurable vocabulary size (16384 for full, 256 for test)
-- Special tokens for sequence boundaries (<BOS>, <EOS>, <UNK>)
-- Memory-efficient streaming from cleaned articles
-- Fast batch encoding/decoding with parallel processing
+- Pre-trained CodeLlama tokenizer from HuggingFace (codellama/CodeLlama-7b-hf)
+- Fixed vocabulary size of 32,016 tokens (2x larger than custom)
+- Special tokens: <s> (BOS, ID=1), </s> (EOS, ID=2), <unk> (UNK, ID=0)
+- Full Unicode support for international text and symbols
+- Optimized for both natural language and code
+- Fast batch encoding/decoding with Rust implementation
 
 **Input**: Cleaned articles from `/home/andrea/Desktop/data/cleaned_articles/`
 **Output**: Saved tokenizer models in `tokenizers/` directory
 
 **Processing Characteristics**:
-- Progress bars during vocabulary learning
-- Perfect reconstruction of ASCII text
-- Compression ratio: ~3-4x on typical English text
-- Automatic save/load of trained models
+- Downloads pre-trained model from HuggingFace on first use
+- Perfect reconstruction of Unicode text
+- Compression ratio: ~2.76x on typical English text
+- Better performance on code and technical content
+- Automatic caching of downloaded tokenizer
 
 ### Phase 3: Dataset Preparation (dataset_prep.py)
 **Purpose**: Tokenize cleaned articles into training sequences with sliding windows
 
 **Key Features**:
-- Loads trained BPE tokenizer (test or full mode)
+- Loads CodeLlama tokenizer (always full 32,016 vocab)
 - Processes cleaned files sequentially with memory efficiency
 - Creates sliding windows with 50% overlap for continuity
-- Batch tokenization using Hugging Face multi-threading
+- Batch tokenization using HuggingFace transformers
 - Saves sequences as NumPy uint16 arrays for efficient loading
 
 **Input**: Cleaned articles from `/home/andrea/Desktop/data/cleaned_articles/`
@@ -114,6 +117,7 @@ Desktop/
 - Batch processing (default 10,000 articles per batch)
 - Real-time progress tracking with speed statistics
 - Metadata generation with compression metrics
+- Outputs to codellama_test_dataset or codellama_full_dataset
 
 ### Phase 4: Data Loading (dataloader.py)
 **Purpose**: High-performance PyTorch DataLoader for training with full dataset in RAM/GPU
@@ -125,7 +129,7 @@ Desktop/
 - Automatic concatenation of all tokenized files
 - Memory usage reporting and statistics
 
-**Input**: Tokenized sequences from `/home/andrea/Desktop/data/tokenized_datasets/full_dataset/`
+**Input**: Tokenized sequences from `/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset/`
 **Output**: PyTorch DataLoader ready for training
 
 **Processing Characteristics**:
@@ -144,6 +148,7 @@ Desktop/
 - Tied input/output embeddings to reduce parameters
 - Support for autoregressive text generation
 - Configurable architecture via config.json
+- Vocabulary size of 32,016 tokens (CodeLlama)
 
 **Generation Capabilities**:
 - Temperature-based sampling
@@ -198,31 +203,50 @@ Desktop/
    - Integration with PyTorch optimizers
 
 ### Phase 8: Model Inference (Inference.py)
-**Purpose**: Interactive text generation using trained model checkpoints
+**Purpose**: Interactive text generation using trained model checkpoints with single and multi-model comparison modes
 
 **Key Features**:
-- Interactive checkpoint selection with file details
-- Two input modes: custom prompts or predefined examples
+- **Two Inference Modes**:
+  - Single model inference for standard text generation
+  - Multi-model comparison for A/B testing different checkpoints
+- Hierarchical checkpoint organization by training runs
+- Interactive two-step selection: training run → checkpoint
+- Custom prompt input with full Unicode support
 - Configurable generation parameters (temperature, top-k, top-p)
 - Color-coded terminal interface with ANSI codes
 - Real-time generation statistics and performance metrics
 - Continuous generation loop without model reloading
+- No ASCII cleaning required - handles all text types
+
+**Multi-Model Comparison Features**:
+- Load multiple checkpoints simultaneously
+- Side-by-side generation from the same prompt
+- Performance comparison statistics (speed, tokens/sec)
+- Memory warnings for GPU constraints
+- Automatic identification of fastest/most productive models
 
 **Input**: Trained checkpoints from `checkpoints/` directory
-**Output**: Generated text with statistics
+**Output**: Generated text with statistics (single or comparative)
 
 **Processing Characteristics**:
 - Automatic GPU/CPU detection and optimization
-- Handles compiled model state dictionaries
-- Falls back between full and test tokenizers
+- Handles compiled model state dictionaries (removes "_orig_mod." prefix)
+- Uses CodeLlama tokenizer exclusively
 - Memory-efficient with GPU cache management
 - Batch generation support with proper EOS handling
+- Backward compatibility with flat checkpoint structure
+- Full Unicode text generation support
+
+**Checkpoint Organization**:
+- New: Hierarchical structure with subdirectories per training run
+- Legacy: Flat structure with all checkpoints in base directory
+- Automatic detection and handling of both formats
 
 **Generation Parameters**:
 - **Max Length**: Maximum tokens to generate (default: 200)
 - **Temperature**: Controls randomness (default: 0.8)
-- **Top-k**: Limits vocabulary to top k tokens (default: 50)
-- **Top-p**: Nucleus sampling threshold (default: 0.95)
+- **Top-k**: Limits vocabulary to top k tokens (default: 50, 0 to disable)
+- **Top-p**: Nucleus sampling threshold (default: 0.95, 1.0 to disable)
 
 ### Upcoming Phases (To Be Implemented)
 
@@ -244,29 +268,29 @@ python3 cleaner.py
 # Output: /home/andrea/Desktop/data/cleaned_articles/
 ```
 
-### Training and Using the Tokenizer
+### Using the CodeLlama Tokenizer
 ```bash
-# Test mode: small vocab (256) on first cleaned file
-python3 tokenizer.py --test
-
-# Full training: 16384 vocab on all cleaned files
+# Download and save CodeLlama tokenizer
 python3 tokenizer.py
 
-# Encode text with trained tokenizer
+# Encode text with CodeLlama tokenizer
 python3 tokenizer.py --encode "Hello world"
+
+# Encode code with CodeLlama tokenizer
+python3 tokenizer.py --encode "def hello(): return 'world'"
 
 # Decode token IDs
 python3 tokenizer.py --decode "123,456,789"
 
-# Load existing tokenizer
-python3 tokenizer.py --load tokenizers/full_tokenizer
+# Load saved tokenizer
+python3 tokenizer.py --load tokenizers/codellama_tokenizer
 
-# Output: tokenizers/test_tokenizer/ or tokenizers/full_tokenizer/
+# Output: tokenizers/codellama_tokenizer/
 ```
 
 ### Preparing the Dataset
 ```bash
-# Test mode: tokenize first 10,000 articles with test tokenizer
+# Test mode: tokenize first 10,000 articles with CodeLlama
 python3 dataset_prep.py --test
 
 # Full dataset: tokenize all 38 cleaned files
@@ -278,7 +302,7 @@ python3 dataset_prep.py --window 1024
 # Custom batch size (default 10000)
 python3 dataset_prep.py --batch 5000
 
-# Output: /home/andrea/Desktop/data/tokenized_datasets/
+# Output: /home/andrea/Desktop/data/tokenized_datasets/codellama_*_dataset/
 ```
 
 ### Creating and Testing the Model
@@ -291,7 +315,7 @@ model = create_model("config.json")
 
 # Test forward pass
 import torch
-input_ids = torch.randint(0, 16384, (batch_size, seq_len))
+input_ids = torch.randint(0, 32016, (batch_size, seq_len))
 outputs = model(input_ids, labels=input_ids)
 print(f"Loss: {outputs['loss'].item()}")
 
@@ -370,24 +394,72 @@ tensorboard --logdir logs/tensorboard
 python3 Inference.py
 
 # The script will:
-# 1. List available checkpoints with details
-# 2. Load selected model and tokenizer
-# 3. Offer custom or predefined prompts
-# 4. Generate text with configurable parameters
-# 5. Display generation statistics
+# 1. Select inference mode (single model or multi-model comparison)
+# 2. List available training runs (or use base directory if flat structure)
+# 3. Select specific checkpoint(s) within the chosen run
+# 4. Load selected model(s) and tokenizer
+# 5. Enter custom prompts
+# 6. Configure or use default generation parameters
+# 7. Generate and display text with statistics
 
-# Example workflow:
-# - Select checkpoint_best.pt for best model
-# - Choose "Write custom prompt" mode
-# - Enter "The future of AI is"
-# - Use default generation parameters
+# Single Model Workflow:
+# - Select mode: 1 (Single model inference)
+# - Select training run from list (most recent highlighted)
+# - Select checkpoint (best/latest highlighted in colors)
+# - Enter custom prompt: "The future of AI is"
+# - Choose: 1 (Use default parameters) or 2 (Customize)
 # - View generated text and statistics
-# - Continue generating or exit
+# - Continue with new prompts or quit
+
+# Multi-Model Comparison Workflow:
+# - Select mode: 2 (Multi-model comparison)
+# - Select training run from list
+# - Select multiple checkpoints: enter comma-separated numbers (e.g., 1,3,5)
+#   or 'all' to load all checkpoints
+# - System shows memory usage and warnings if needed
+# - Enter custom prompt for all models
+# - Configure generation parameters (applied to all models)
+# - View side-by-side generation results
+# - See performance summary (fastest, most tokens, highest speed)
+# - Continue with new prompts or quit
+
+# Notes:
+# - GPU memory is automatically managed with cache clearing
+# - Supports backward compatibility with old flat checkpoint structure
+# - Color coding: GREEN for best checkpoint, BLUE for latest
+# - Memory warnings appear when loading multiple large models
 ```
 
 ## Configuration System
 
 The `config.json` file centralizes all configuration for the pipeline:
+
+```json
+{
+  "model": {
+    "vocab_size": 32016,  // CodeLlama vocabulary size
+    "hidden_size": 512,
+    "num_layers": 32,
+    "num_heads": 16,
+    "max_position_embeddings": 512,
+    "dropout": 0.1,
+    "attention_dropout": 0.1,
+    "layer_norm_eps": 1e-5,
+    "initializer_range": 0.02,
+    "use_cache": true
+  },
+  "tokenizer": {
+    "bos_token_id": 1,  // CodeLlama <s> token
+    "eos_token_id": 2,  // CodeLlama </s> token
+    "unk_token_id": 0,  // CodeLlama <unk> token
+    "pad_token_id": 2   // Reuses EOS token for padding
+  },
+  "paths": {
+    "tokenizer_dir": "tokenizers/codellama_tokenizer",
+    "dataset_dir": "/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset"
+  }
+}
+```
 
 ## Development Guidelines
 
@@ -429,3 +501,14 @@ The pipeline implements strict error handling:
 ---
 
 *This document will be updated as new components are implemented.*
+
+## Recent Updates
+
+### CodeLlama Tokenizer Integration (Latest)
+- Replaced custom BPE tokenizer with pre-trained CodeLlama tokenizer
+- Vocabulary increased from 16,384 to 32,016 tokens
+- Added full Unicode support (no longer ASCII-only)
+- Improved code tokenization with CodeLlama's optimizations
+- Special token IDs updated: BOS=1, EOS=2, UNK=0, PAD=2
+- New dataset paths: codellama_test_dataset and codellama_full_dataset
+- **Note**: Existing models trained with the old tokenizer are incompatible

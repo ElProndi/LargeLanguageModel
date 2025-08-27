@@ -16,7 +16,6 @@ import numpy as np
 # Import project modules
 from model import TransformerLM
 from tokenizer import WikipediaTokenizer
-from cleaner import clean_for_tokenizer
 
 
 # ANSI color codes for terminal output
@@ -338,26 +337,21 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
     print_info("Loading tokenizer...")
     tokenizer = WikipediaTokenizer()
     
-    # Try to load full tokenizer first, then fallback to test tokenizer
-    tokenizer_paths = [
-        Path("tokenizers/full_tokenizer"),
-        Path("tokenizers/test_tokenizer")
-    ]
+    # Load CodeLlama tokenizer
+    tokenizer_path = Path("tokenizers/codellama_tokenizer")
     
-    tokenizer_loaded = False
-    for tokenizer_path in tokenizer_paths:
-        if tokenizer_path.exists():
-            try:
-                tokenizer.load(str(tokenizer_path))
-                print_success(f"Tokenizer loaded from {tokenizer_path}")
-                tokenizer_loaded = True
-                break
-            except Exception as e:
-                print_warning(f"Failed to load tokenizer from {tokenizer_path}: {e}")
-    
-    if not tokenizer_loaded:
-        print_error("No tokenizer found! Please train a tokenizer first using tokenizer.py")
-        sys.exit(1)
+    if tokenizer_path.exists():
+        try:
+            tokenizer.load(str(tokenizer_path))
+            print_success(f"CodeLlama tokenizer loaded from {tokenizer_path}")
+        except Exception as e:
+            print_error(f"Failed to load tokenizer from {tokenizer_path}: {e}")
+            sys.exit(1)
+    else:
+        print_info("CodeLlama tokenizer not found locally. Downloading from HuggingFace...")
+        tokenizer.train()  # Downloads the pre-trained tokenizer
+        tokenizer.save(str(tokenizer_path))
+        print_success(f"CodeLlama tokenizer downloaded and saved to {tokenizer_path}")
     
     return model, tokenizer
 
@@ -493,17 +487,13 @@ def generate_text(
     Returns:
         Generated text string
     """
-    # Clean prompt to ASCII
-    cleaned_prompt = clean_for_tokenizer(prompt)
-    if cleaned_prompt != prompt:
-        print_info(f"Cleaned prompt for ASCII-only tokenizer")
-    
-    # Encode prompt
+    # Encode prompt (no cleaning needed - CodeLlama handles Unicode)
     print_info(f"Encoding prompt...")
-    input_ids = tokenizer.encode(cleaned_prompt)
+    input_ids = tokenizer.encode(prompt)
     
     # Add BOS token at the beginning if not present
-    bos_id = tokenizer.tokenizer.token_to_id("<BOS>")
+    special_tokens = tokenizer.get_special_token_ids()
+    bos_id = special_tokens['bos_token_id']
     if input_ids[0] != bos_id:
         input_ids = [bos_id] + input_ids
     
@@ -518,7 +508,7 @@ def generate_text(
     with torch.no_grad():
         generated_ids = model.generate(
             input_tensor,
-            eos_token_id=tokenizer.tokenizer.token_to_id("<EOS>"),
+            eos_token_id=special_tokens['eos_token_id'],
             **generation_params
         )
     
@@ -554,24 +544,22 @@ def generate_text_multi_model(
     """
     results = {}
     
-    # Clean prompt to ASCII
-    cleaned_prompt = clean_for_tokenizer(prompt)
-    
     print(f"\n{Colors.BOLD}Generating from {len(models_dict)} models...{Colors.ENDC}")
     print(f"Prompt: {Colors.CYAN}{prompt}{Colors.ENDC}")
-    if cleaned_prompt != prompt:
-        print(f"Cleaned: {Colors.CYAN}{cleaned_prompt}{Colors.ENDC}")
     print("-" * 60)
     
     for idx, (model_name, (model, tokenizer)) in enumerate(models_dict.items(), 1):
         print(f"\n{Colors.BLUE}[{idx}/{len(models_dict)}] Model: {model_name}{Colors.ENDC}")
         
         try:
-            # Encode prompt (use cleaned version)
-            input_ids = tokenizer.encode(cleaned_prompt)
+            # Encode prompt  
+            input_ids = tokenizer.encode(prompt)
+            
+            # Get special token IDs
+            special_tokens = tokenizer.get_special_token_ids()
+            bos_id = special_tokens['bos_token_id']
             
             # Add BOS token if needed
-            bos_id = tokenizer.tokenizer.token_to_id("<BOS>")
             if input_ids[0] != bos_id:
                 input_ids = [bos_id] + input_ids
             
@@ -584,7 +572,7 @@ def generate_text_multi_model(
             with torch.no_grad():
                 generated_ids = model.generate(
                     input_tensor,
-                    eos_token_id=tokenizer.tokenizer.token_to_id("<EOS>"),
+                    eos_token_id=special_tokens['eos_token_id'],
                     **generation_params
                 )
             
