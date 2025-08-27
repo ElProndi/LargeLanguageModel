@@ -121,11 +121,11 @@ def create_simple_train_val_dataloaders(
     
     # Determine data directory
     if test_mode:
-        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/test_dataset")
+        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_test_dataset")
         if not data_dir.exists():
-            data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/full_dataset")
+            data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset")
     else:
-        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/full_dataset")
+        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset")
     
     # Load metadata
     metadata_path = data_dir / "metadata.json"
@@ -406,11 +406,11 @@ def calculate_dataloader_stats(
     """
     # Determine data directory
     if test_mode:
-        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/test_dataset")
+        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_test_dataset")
         if not data_dir.exists():
-            data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/full_dataset")
+            data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset")
     else:
-        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/full_dataset")
+        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset")
     
     # Load metadata
     metadata_path = data_dir / "metadata.json"

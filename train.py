@@ -334,7 +334,8 @@ class Trainer:
             optimizer_groups,
             lr=self.config['training']['learning_rate'],
             betas=(0.9, 0.999),
-            eps=1e-8
+            eps=1e-8,
+            fused=True
         )
         
         print(f"Optimizer: AdamW configured")
@@ -448,9 +449,13 @@ class Trainer:
                 # Only sync on first batch to establish the pattern
                 torch.cuda.synchronize()
             
-            # Forward pass
-            outputs = self.model(input_ids=batch, labels=batch)
-            loss = outputs['loss']
+            # Forward pass with bfloat16 autocast (same as training)
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                outputs = self.model(input_ids=batch, labels=batch)
+                loss = outputs['loss']
+                
+                # Store loss value while in autocast context
+                loss_value = loss.item()
             
             # Visualization: Show model predictions for first batch only
             if i == 0 and not visualization_shown:
@@ -513,9 +518,9 @@ class Trainer:
                 print(f"\n📈 Sequence Accuracy: {accuracy:.1f}% ({correct_predictions}/{len(predicted_display)} tokens)")
                 print("="*80 + "\n")
             
-            # Accumulate metrics - use .item() to detach from computation graph
+            # Accumulate metrics - use stored loss_value from autocast context
             # This ensures we only keep the scalar value, not the tensor
-            total_loss += loss.item() * batch.size(0)
+            total_loss += loss_value * batch.size(0)
             total_tokens += batch.numel()
             num_batches += 1
             

@@ -7,43 +7,79 @@ using native PyTorch modules for efficiency and simplicity.
 """
 
 import json
-from typing import Optional, Union
+import os
+from typing import Optional, Union, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
+# Import our custom modules
+from utils.rope import RotaryEmbedding
+from utils.activations import SwiGLU
+
+# Set environment variable for optimal memory allocation on GPU
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+# Enable TF32 for better performance
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision('medium')
 
 class FastMultiHeadAttention(nn.Module):
     """
-    Optimized Multi-Head Attention using packed projections and scaled_dot_product_attention.
-    This implementation is significantly faster than nn.MultiheadAttention.
+    Optimized Multi-Head Attention with Grouped Query Attention (GQA) support.
+    Uses RoPE for position encoding and forced Flash Attention for maximum performance.
     """
     
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
+        num_kv_heads: Optional[int] = None,
         dropout: float = 0.0,
-        bias: bool = True
+        bias: bool = True,
+        max_position_embeddings: int = 512,
+        rope_theta: float = 10000.0,
+        rope_scaling: float = 1.0,
+        force_flash_attention: bool = True
     ):
         super().__init__()
         assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
         
         self.hidden_size = hidden_size
         self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.head_dim = hidden_size // num_heads
         self.scale = self.head_dim ** -0.5
         
-        # Packed projection: Q, K, V in a single Linear layer
-        # This reduces memory bandwidth by 3x compared to separate projections
-        self.qkv_proj = nn.Linear(hidden_size, 3 * hidden_size, bias=bias)
+        # Ensure num_heads is divisible by num_kv_heads for even grouping
+        assert self.num_heads % self.num_kv_heads == 0, \
+            f"num_heads ({num_heads}) must be divisible by num_kv_heads ({self.num_kv_heads})"
+        self.num_groups = self.num_heads // self.num_kv_heads
+        
+        # Separate projections for GQA
+        # Q projection uses all heads, KV projections use fewer heads
+        self.q_proj = nn.Linear(hidden_size, self.num_heads * self.head_dim, bias=bias)
+        self.k_proj = nn.Linear(hidden_size, self.num_kv_heads * self.head_dim, bias=bias)
+        self.v_proj = nn.Linear(hidden_size, self.num_kv_heads * self.head_dim, bias=bias)
         
         # Output projection
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
         
         self.dropout = dropout
+        
+        # Initialize RoPE (TorchInductor-compatible real-valued operations)
+        self.rotary_emb = RotaryEmbedding(
+            dim=self.head_dim,
+            max_position_embeddings=max_position_embeddings,
+            theta=rope_theta,
+            scaling_factor=rope_scaling,
+            device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        )
+        
+        # Flash Attention settings
+        self.force_flash_attention = force_flash_attention
     
     def forward(
         self,
@@ -53,29 +89,64 @@ class FastMultiHeadAttention(nn.Module):
     ) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
         
-        # Packed projection and split into Q, K, V
-        # Shape: (batch, seq_len, 3 * hidden_size)
-        qkv = self.qkv_proj(hidden_states)
+        # Compute Q, K, V projections separately for GQA
+        # Q: (batch, seq_len, num_heads * head_dim)
+        q = self.q_proj(hidden_states)
+        # K, V: (batch, seq_len, num_kv_heads * head_dim)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
         
-        # Reshape to separate Q, K, V and heads
-        # Shape: (batch, seq_len, 3, num_heads, head_dim)
-        qkv = qkv.reshape(batch_size, seq_len, 3, self.num_heads, self.head_dim)
+        # Reshape Q to (batch, num_heads, seq_len, head_dim)
+        q = q.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        q = q.transpose(1, 2)
         
-        # Permute to (3, batch, num_heads, seq_len, head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)
+        # Reshape K, V to (batch, num_kv_heads, seq_len, head_dim)
+        k = k.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        k = k.transpose(1, 2)
+        v = v.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        v = v.transpose(1, 2)
         
-        # Split into separate Q, K, V tensors
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        # Apply RoPE to Q and K
+        q, k = self.rotary_emb(q, k)
         
-        # Use PyTorch's optimized scaled_dot_product_attention
-        # This automatically selects the best backend (FlashAttention, Memory-Efficient, or Math)
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=attention_mask,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=is_causal and attention_mask is None,
-            scale=self.scale
-        )
+        # Expand K and V to match Q heads for GQA
+        if self.num_kv_heads != self.num_heads:
+            # Repeat KV heads to match Q heads
+            # Shape: (batch, num_kv_heads, seq_len, head_dim) -> (batch, num_heads, seq_len, head_dim)
+            k = k.repeat_interleave(self.num_groups, dim=1)
+            v = v.repeat_interleave(self.num_groups, dim=1)
+        
+        # Force Flash Attention backend for optimal performance on RTX 3080 Ti
+        if self.force_flash_attention and torch.cuda.is_available():
+            try:
+                # Try to use Flash Attention backend
+                with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                    attn_output = F.scaled_dot_product_attention(
+                        q, k, v,
+                        attn_mask=attention_mask,
+                        dropout_p=self.dropout if self.training else 0.0,
+                        is_causal=is_causal and attention_mask is None,
+                        scale=self.scale
+                    )
+            except RuntimeError:
+                # Fallback to efficient attention if Flash Attention fails
+                with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+                    attn_output = F.scaled_dot_product_attention(
+                        q, k, v,
+                        attn_mask=attention_mask,
+                        dropout_p=self.dropout if self.training else 0.0,
+                        is_causal=is_causal and attention_mask is None,
+                        scale=self.scale
+                    )
+        else:
+            # Default behavior - let PyTorch choose the best backend
+            attn_output = F.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=attention_mask,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=is_causal and attention_mask is None,
+                scale=self.scale
+            )
         
         # Reshape back to (batch, seq_len, hidden_size)
         attn_output = attn_output.transpose(1, 2).contiguous()
@@ -86,40 +157,65 @@ class FastMultiHeadAttention(nn.Module):
         
         return output
 
-
 class FastTransformerDecoderLayer(nn.Module):
     """
-    Optimized Transformer Decoder Layer using FastMultiHeadAttention.
-    Uses pre-norm architecture for better training stability.
+    Optimized Transformer Decoder Layer using FastMultiHeadAttention with RoPE.
+    Uses SwiGLU activation and pre-norm architecture for better training stability.
     """
     
     def __init__(
         self,
         hidden_size: int,
         num_heads: int,
-        intermediate_size: int,
+        num_kv_heads: Optional[int] = None,
+        intermediate_size: int = None,
         dropout: float = 0.1,
         attention_dropout: float = 0.1,
         layer_norm_eps: float = 1e-5,
-        bias: bool = True
+        bias: bool = True,
+        use_rms_norm: bool = True,
+        use_swiglu: bool = True,
+        max_position_embeddings: int = 512,
+        rope_theta: float = 10000.0,
+        rope_scaling: float = 1.0,
+        force_flash_attention: bool = True
     ):
         super().__init__()
         
-        # Self-attention components
+        if intermediate_size is None:
+            intermediate_size = hidden_size * 4
+        
+        # Self-attention components with optional GQA and RoPE
         self.self_attn = FastMultiHeadAttention(
             hidden_size=hidden_size,
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             dropout=attention_dropout,
-            bias=bias
+            bias=bias,
+            max_position_embeddings=max_position_embeddings,
+            rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
+            force_flash_attention=force_flash_attention
         )
         
-        # Feed-forward network
-        self.fc1 = nn.Linear(hidden_size, intermediate_size, bias=bias)
-        self.fc2 = nn.Linear(intermediate_size, hidden_size, bias=bias)
+        # Feed-forward network - use SwiGLU or standard FFN
+        self.use_swiglu = use_swiglu
+        if use_swiglu:
+            self.ffn = SwiGLU(
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                bias=bias,
+                dropout=dropout
+            )
+        else:
+            # Fallback to standard FFN
+            self.fc1 = nn.Linear(hidden_size, intermediate_size, bias=bias)
+            self.fc2 = nn.Linear(intermediate_size, hidden_size, bias=bias)
         
-        # Layer norms (pre-norm architecture)
-        self.norm1 = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
-        self.norm2 = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+        # Use RMSNorm or LayerNorm based on configuration
+        norm_class = nn.RMSNorm if use_rms_norm else nn.LayerNorm
+        self.norm1 = norm_class(hidden_size, eps=layer_norm_eps)
+        self.norm2 = norm_class(hidden_size, eps=layer_norm_eps)
         
         # Dropout
         self.dropout = nn.Dropout(dropout)
@@ -147,19 +243,23 @@ class FastTransformerDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.norm2(hidden_states)
         
-        # FFN with GELU activation
-        hidden_states = self.fc1(hidden_states)
-        hidden_states = F.gelu(hidden_states)
-        hidden_states = self.fc2(hidden_states)
-        hidden_states = self.dropout(hidden_states)
+        if self.use_swiglu:
+            # Use SwiGLU activation
+            hidden_states = self.ffn(hidden_states)
+        else:
+            # Standard FFN with GELU activation
+            hidden_states = self.fc1(hidden_states)
+            hidden_states = F.gelu(hidden_states)
+            hidden_states = self.fc2(hidden_states)
+            hidden_states = self.dropout(hidden_states)
+        
         hidden_states = residual + hidden_states
         
         return hidden_states
 
-
 class FastTransformerDecoder(nn.Module):
     """
-    Stack of optimized Transformer Decoder layers.
+    Stack of optimized Transformer Decoder layers with RoPE and SwiGLU.
     Eliminates unnecessary operations from nn.TransformerDecoder.
     """
     
@@ -168,30 +268,48 @@ class FastTransformerDecoder(nn.Module):
         num_layers: int,
         hidden_size: int,
         num_heads: int,
-        intermediate_size: int,
+        num_kv_heads: Optional[int] = None,
+        intermediate_size: Optional[int] = None,
         dropout: float = 0.1,
         attention_dropout: float = 0.1,
         layer_norm_eps: float = 1e-5,
-        bias: bool = True
+        bias: bool = True,
+        use_rms_norm: bool = True,
+        use_swiglu: bool = True,
+        max_position_embeddings: int = 512,
+        rope_theta: float = 10000.0,
+        rope_scaling: float = 1.0,
+        force_flash_attention: bool = True
     ):
         super().__init__()
         
-        # Stack of decoder layers
+        if intermediate_size is None:
+            intermediate_size = hidden_size * 4
+        
+        # Stack of decoder layers with GQA, RoPE, SwiGLU, and RMSNorm support
         self.layers = nn.ModuleList([
             FastTransformerDecoderLayer(
                 hidden_size=hidden_size,
                 num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
                 intermediate_size=intermediate_size,
                 dropout=dropout,
                 attention_dropout=attention_dropout,
                 layer_norm_eps=layer_norm_eps,
-                bias=bias
+                bias=bias,
+                use_rms_norm=use_rms_norm,
+                use_swiglu=use_swiglu,
+                max_position_embeddings=max_position_embeddings,
+                rope_theta=rope_theta,
+                rope_scaling=rope_scaling,
+                force_flash_attention=force_flash_attention
             )
             for _ in range(num_layers)
         ])
         
-        # Final layer norm
-        self.norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+        # Final layer norm - use RMSNorm or LayerNorm based on config
+        norm_class = nn.RMSNorm if use_rms_norm else nn.LayerNorm
+        self.norm = norm_class(hidden_size, eps=layer_norm_eps)
     
     def forward(
         self,
@@ -212,9 +330,8 @@ class FastTransformerDecoder(nn.Module):
         
         return hidden_states
 
-
 class TransformerLM(nn.Module):
-    """Transformer Language Model using native PyTorch modules."""
+    """Transformer Language Model with RoPE and SwiGLU."""
     
     def __init__(
         self,
@@ -222,7 +339,13 @@ class TransformerLM(nn.Module):
         hidden_size: int = 384,
         num_layers: int = 6,
         num_heads: int = 6,
+        num_kv_heads: Optional[int] = None,
+        use_rms_norm: bool = True,
+        use_swiglu: bool = True,
         max_position_embeddings: int = 512,
+        rope_theta: float = 10000.0,
+        rope_scaling: float = 1.0,
+        force_flash_attention: bool = True,
         dropout: float = 0.1,
         attention_dropout: float = 0.1,
         layer_norm_eps: float = 1e-5,
@@ -235,13 +358,23 @@ class TransformerLM(nn.Module):
         # Calculate intermediate size as 4x hidden size (standard transformer pattern)
         intermediate_size = hidden_size * 4
         
+        # Default num_kv_heads to num_heads if not specified (backward compatibility)
+        if num_kv_heads is None:
+            num_kv_heads = num_heads
+        
         self.config = {
             'vocab_size': vocab_size,
             'hidden_size': hidden_size,
             'num_layers': num_layers,
             'num_heads': num_heads,
+            'num_kv_heads': num_kv_heads,
+            'use_rms_norm': use_rms_norm,
+            'use_swiglu': use_swiglu,
             'intermediate_size': intermediate_size,
             'max_position_embeddings': max_position_embeddings,
+            'rope_theta': rope_theta,
+            'rope_scaling': rope_scaling,
+            'force_flash_attention': force_flash_attention,
             'dropout': dropout,
             'attention_dropout': attention_dropout,
             'layer_norm_eps': layer_norm_eps,
@@ -250,25 +383,29 @@ class TransformerLM(nn.Module):
             'pad_token_id': pad_token_id
         }
         
-        # Token embeddings
+        # Token embeddings only (RoPE handles position encoding)
         self.embeddings = nn.Embedding(vocab_size, hidden_size, padding_idx=pad_token_id)
-        
-        # Positional embeddings (learned, like GPT-2)
-        self.position_embeddings = nn.Embedding(max_position_embeddings, hidden_size)
         
         # Embedding dropout
         self.embedding_dropout = nn.Dropout(dropout)
         
-        # Use optimized FastTransformerDecoder instead of nn.TransformerDecoder
+        # Use optimized FastTransformerDecoder with GQA, RoPE, SwiGLU, and RMSNorm
         self.transformer = FastTransformerDecoder(
             num_layers=num_layers,
             hidden_size=hidden_size,
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             intermediate_size=intermediate_size,
             dropout=dropout,
             attention_dropout=attention_dropout,
             layer_norm_eps=layer_norm_eps,
-            bias=True
+            bias=True,
+            use_rms_norm=use_rms_norm,
+            use_swiglu=use_swiglu,
+            max_position_embeddings=max_position_embeddings,
+            rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
+            force_flash_attention=force_flash_attention
         )
         
         # Language modeling head (always tied with input embeddings)
@@ -279,13 +416,6 @@ class TransformerLM(nn.Module):
         
         # Initialize weights
         self.apply(self._init_weights)
-        
-        # Register buffer for position IDs
-        self.register_buffer(
-            "position_ids",
-            torch.arange(max_position_embeddings).expand((1, -1)),
-            persistent=False
-        )
         
         # Always move model to GPU if available
         if torch.cuda.is_available():
@@ -310,7 +440,6 @@ class TransformerLM(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
         return_dict: bool = True
     ) -> Union[dict, tuple]:
         """
@@ -320,28 +449,17 @@ class TransformerLM(nn.Module):
             input_ids: Input token IDs (batch_size, seq_len)
             attention_mask: Attention mask for padding (batch_size, seq_len)
             labels: Target token IDs for language modeling loss
-            position_ids: Position IDs for positional embeddings
             return_dict: Whether to return a dictionary
             
         Returns:
             Dictionary with 'logits' and 'loss' (if labels provided)
         """
-        seq_len = input_ids.shape[1]
-        
-        # Get position IDs if not provided
-        if position_ids is None:
-            position_ids = self.position_ids[:, :seq_len]  # type: ignore
-        
-        # Get token and position embeddings
-        token_embeddings = self.embeddings(input_ids)
-        position_embeddings = self.position_embeddings(position_ids)
-        
-        # Combine embeddings
-        hidden_states = token_embeddings + position_embeddings
+        # Get token embeddings (RoPE handles position encoding internally)
+        hidden_states = self.embeddings(input_ids)
         hidden_states = self.embedding_dropout(hidden_states)
         
-        # Pass through optimized transformer decoder
-        # The FastTransformerDecoder handles causal masking internally
+        # Pass through optimized transformer decoder with RoPE and SwiGLU
+        # The FastTransformerDecoder handles causal masking and position encoding internally
         hidden_states = self.transformer(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -409,7 +527,9 @@ class TransformerLM(nn.Module):
         # Track which sequences are done
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
         
-        with torch.no_grad():
+        # Use bfloat16 autocast for generation (matches training precision)
+        # This ensures Flash Attention and other optimized kernels work correctly
+        with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
             while generated.shape[1] < max_length:
                 # Forward pass - get logits for the last position
                 outputs = self.forward(generated, return_dict=True)
@@ -468,22 +588,36 @@ class TransformerLM(nn.Module):
         # Token embeddings (shared with output layer due to tying)
         embedding_params = self.embeddings.weight.numel()
         
-        # Positional embeddings
-        positional_params = self.position_embeddings.weight.numel()
+        # No positional embeddings anymore (RoPE is parameter-free)
+        positional_params = 0
         
         # Calculate parameters for a single transformer block
         hidden_size = self.config['hidden_size']
         intermediate_size = self.config['intermediate_size']
+        num_heads = self.config['num_heads']
+        num_kv_heads = self.config['num_kv_heads']
+        head_dim = hidden_size // num_heads
+        use_swiglu = self.config.get('use_swiglu', True)
         
-        # Attention module parameters
-        qkv_proj_params = hidden_size * (3 * hidden_size)  # QKV projection
+        # Attention module parameters with GQA
+        q_proj_params = hidden_size * (num_heads * head_dim)  # Q projection
+        k_proj_params = hidden_size * (num_kv_heads * head_dim)  # K projection (smaller with GQA)
+        v_proj_params = hidden_size * (num_kv_heads * head_dim)  # V projection (smaller with GQA)
         o_proj_params = hidden_size * hidden_size  # Output projection
-        attention_params = qkv_proj_params + o_proj_params
+        attention_params = q_proj_params + k_proj_params + v_proj_params + o_proj_params
         
-        # Feed-forward network parameters
-        fc1_params = hidden_size * intermediate_size
-        fc2_params = intermediate_size * hidden_size
-        ffn_params = fc1_params + fc2_params
+        # Feed-forward network parameters (SwiGLU has 3 matrices instead of 2)
+        if use_swiglu:
+            # SwiGLU uses gate, up, and down projections
+            gate_params = hidden_size * intermediate_size
+            up_params = hidden_size * intermediate_size
+            down_params = intermediate_size * hidden_size
+            ffn_params = gate_params + up_params + down_params
+        else:
+            # Standard FFN
+            fc1_params = hidden_size * intermediate_size
+            fc2_params = intermediate_size * hidden_size
+            ffn_params = fc1_params + fc2_params
         
         # LayerNorm parameters (2 per block: norm1 and norm2)
         layernorm_params_per = hidden_size * 2  # weight + bias
@@ -533,6 +667,10 @@ def create_model(config_path: str = "config.json") -> TransformerLM:
     if not torch.cuda.is_available():
         print("⚠️  Warning: CUDA is not available. Model will remain on CPU.")
         print("    For training, a GPU is required. Please ensure CUDA is properly installed.")
+    else:
+        # Log Flash Attention availability
+        print(f"🚀 GPU detected: {torch.cuda.get_device_name()}")
+        print("   Flash Attention will be enforced for optimal performance")
     
     # Load configuration
     with open(config_path, 'r') as f:
@@ -541,14 +679,22 @@ def create_model(config_path: str = "config.json") -> TransformerLM:
     # Extract model configuration
     model_config = config['model']
     tokenizer_config = config.get('tokenizer', {})
+    rope_config = config.get('rope', {})
     
-    # Create model with configuration
+    # Create model with configuration, including GQA, RoPE, SwiGLU, and Flash Attention
+    # Use backward-compatible defaults for old configs
     model = TransformerLM(
         vocab_size=model_config['vocab_size'],
         hidden_size=model_config['hidden_size'],
         num_layers=model_config['num_layers'],
         num_heads=model_config['num_heads'],
+        num_kv_heads=model_config.get('num_kv_heads', model_config['num_heads']),
+        use_rms_norm=model_config.get('use_rms_norm', True),
+        use_swiglu=model_config.get('use_swiglu', True),  # Default to SwiGLU
         max_position_embeddings=model_config['max_position_embeddings'],
+        rope_theta=rope_config.get('theta', 10000.0),
+        rope_scaling=rope_config.get('scaling_factor', 1.0),
+        force_flash_attention=model_config.get('force_flash_attention', True),
         dropout=model_config['dropout'],
         attention_dropout=model_config['attention_dropout'],
         layer_norm_eps=model_config['layer_norm_eps'],
@@ -575,21 +721,30 @@ if __name__ == "__main__":
     print("Model Parameter Breakdown")
     print("="*60)
     
-    # Calculate attention head size
+    # Calculate attention head size and GQA ratio
     config = model.config
     head_size = config['hidden_size'] // config['num_heads']
-    print(f"\n🎯 Attention Head Size: {head_size} dimensions")
-    print(f"   (hidden_size={config['hidden_size']} / num_heads={config['num_heads']})")
+    gqa_ratio = config['num_heads'] // config['num_kv_heads']
+    print(f"\n🎯 Architecture Configuration:")
+    print(f"   Head Size: {head_size} dimensions")
+    print(f"   Query Heads: {config['num_heads']}")
+    print(f"   KV Heads: {config['num_kv_heads']} (GQA ratio {gqa_ratio}:1)")
+    print(f"   Using RMSNorm: {config['use_rms_norm']}")
+    print(f"   Using SwiGLU: {config.get('use_swiglu', True)}")
+    print(f"   Using RoPE: Yes (θ={config.get('rope_theta', 10000.0)})")
+    print(f"   Force Flash Attention: {config.get('force_flash_attention', True)}")
     
     print("\n📦 Embeddings")
-    print(f"   ├── Token Embeddings:       {params['embedding']:>12,} params")
-    print(f"   └── Position Embeddings:    {params['positional']:>12,} params")
-    print(f"   Total Embeddings:           {params['embedding'] + params['positional']:>12,} params")
+    print(f"   └── Token Embeddings:       {params['embedding']:>12,} params")
+    print(f"   Total Embeddings:           {params['embedding']:>12,} params")
+    print(f"   (RoPE is parameter-free)")
     
     print("\n🔧 Single Transformer Block")
     print(f"   ├── Attention (QKV + O_proj): {params['attention_per_block']:>11,} params")
-    print(f"   ├── Feed-Forward Network:     {params['ffn_per_block']:>11,} params")
-    print(f"   └── LayerNorms (2x):          {params['layernorm_per_block']:>11,} params")
+    ffn_type = "SwiGLU (3 matrices)" if config.get('use_swiglu', True) else "Standard FFN"
+    print(f"   ├── {ffn_type:24} {params['ffn_per_block']:>11,} params")
+    norm_type = "RMSNorms" if config.get('use_rms_norm', True) else "LayerNorms"
+    print(f"   └── {norm_type} (2x):            {params['layernorm_per_block']:>11,} params")
     print(f"   Total per block:              {params['single_block']:>11,} params")
     
     print(f"\n🏗️  All Transformer Layers ({params['num_layers']} blocks)")
@@ -604,10 +759,11 @@ if __name__ == "__main__":
     
     # Calculate percentages
     print("\n📊 Parameter Distribution")
-    print(f"   Embeddings:      {(params['embedding'] + params['positional']) / params['total'] * 100:>5.1f}%")
+    print(f"   Embeddings:      {params['embedding'] / params['total'] * 100:>5.1f}%")
     print(f"   Transformer:     {params['transformer'] / params['total'] * 100:>5.1f}%")
     print(f"     - Attention:   {(params['attention_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
-    print(f"     - FFN:         {(params['ffn_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
+    ffn_label = "SwiGLU" if config.get('use_swiglu', True) else "FFN"
+    print(f"     - {ffn_label:10} {(params['ffn_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
     print("\n" + "="*60)
     
     # Get model device for creating test inputs
@@ -618,14 +774,17 @@ if __name__ == "__main__":
     print(f"\nTesting forward pass with input shape: {dummy_input.shape}")
     print(f"Input device: {dummy_input.device}")
     
-    outputs = model(dummy_input, labels=dummy_input)
+    # Use bfloat16 for Flash Attention compatibility
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        outputs = model(dummy_input, labels=dummy_input)
     print(f"Output logits shape: {outputs['logits'].shape}")
     print(f"Loss: {outputs['loss'].item():.4f}")
     
     # Test generation
     print(f"\nTesting generation...")
     prompt = torch.randint(0, 32016, (1, 10), device=device)  # Single prompt of 10 tokens
-    generated = model.generate(prompt, max_length=50, temperature=0.8, top_k=50)
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        generated = model.generate(prompt, max_length=50, temperature=0.8, top_k=50)
     print(f"Generated shape: {generated.shape}")
     
     print(f"\nAll tests passed!")
