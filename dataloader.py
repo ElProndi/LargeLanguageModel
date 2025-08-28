@@ -46,7 +46,8 @@ class SimpleDataset(Dataset):
         
         # Convert to tensor with int16 for storage efficiency
         # We'll convert to int64 on-the-fly in __getitem__
-        self.data = torch.from_numpy(sequences_numpy.astype(np.int16))
+        # Explicitly specify dtype to prevent any automatic promotion
+        self.data = torch.tensor(sequences_numpy, dtype=torch.int16)
         
         # Delete the numpy array to free memory immediately
         del sequences_numpy
@@ -88,7 +89,8 @@ def create_simple_train_val_dataloaders(
     test_mode: bool = False,
     verbose: bool = True,
     seed: int = 42,
-    file_subset: str = 'all'
+    file_subset: str = 'all',
+    dataset_source: str = 'wikipedia'
 ) -> Tuple[DataLoader, DataLoader, Dict]:
     """Create train and validation DataLoaders with simplified memory-efficient approach.
     
@@ -107,9 +109,9 @@ def create_simple_train_val_dataloaders(
         test_mode: Use subset for testing
         verbose: Print progress
         seed: Random seed for splitting
-        file_subset: Which files to load ('all', 'first_half', 'second_half',
-                     'first_third', 'second_third', 'third_third',
-                     'first_fourth', 'second_fourth', 'third_fourth', 'fourth_fourth')
+        file_subset: Which files to load ('all', 'first_fourth', 'second_fourth', 
+                     'third_fourth', 'fourth_fourth')
+        dataset_source: Which dataset to use ('wikipedia' or 'fineweb')
         
     Returns:
         Tuple of (train_loader, val_loader, info_dict)
@@ -117,15 +119,27 @@ def create_simple_train_val_dataloaders(
     import gc
     
     if verbose:
-        print(f"Creating Simple Train/Val DataLoaders")
+        print(f"Creating Simple Train/Val DataLoaders (source: {dataset_source})")
     
-    # Determine data directory
-    if test_mode:
-        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_test_dataset")
-        if not data_dir.exists():
-            data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset")
+    # Determine data directory based on dataset source
+    base_path = Path("/home/andrea/Desktop/data/tokenized_datasets")
+    
+    if dataset_source == 'wikipedia':
+        if test_mode:
+            data_dir = base_path / "codellama_test_dataset"
+            if not data_dir.exists():
+                data_dir = base_path / "codellama_full_dataset"
+        else:
+            data_dir = base_path / "codellama_full_dataset"
+    elif dataset_source == 'fineweb':
+        if test_mode:
+            data_dir = base_path / "fineweb_test_dataset"
+            if not data_dir.exists():
+                data_dir = base_path / "fineweb_full_dataset"
+        else:
+            data_dir = base_path / "fineweb_full_dataset"
     else:
-        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset")
+        raise ValueError(f"Invalid dataset_source: {dataset_source}. Must be 'wikipedia' or 'fineweb'")
     
     # Load metadata
     metadata_path = data_dir / "metadata.json"
@@ -152,50 +166,7 @@ def create_simple_train_val_dataloaders(
     # Determine which files to load based on file_subset parameter
     total_files = len(numpy_files)
     
-    if file_subset == 'first_half':
-        # Load first half of files
-        num_files_to_load = total_files // 2
-        numpy_files = numpy_files[:num_files_to_load]
-        if verbose:
-            print(f"  Loading first {num_files_to_load} of {total_files} total files")
-    elif file_subset == 'second_half':
-        # Load second half of files
-        num_files_first_half = total_files // 2
-        numpy_files = numpy_files[num_files_first_half:]
-        if verbose:
-            print(f"  Loading last {len(numpy_files)} of {total_files} total files")
-    elif file_subset == 'first_third':
-        # Load first third of files (files 0-12 for 38 total)
-        num_files_per_third = total_files // 3
-        # First third gets one extra if not evenly divisible
-        if total_files % 3 > 0:
-            num_files_per_third += 1
-        numpy_files = numpy_files[:num_files_per_third]
-        if verbose:
-            print(f"  Loading first third: {len(numpy_files)} of {total_files} files (indices 0-{len(numpy_files)-1})")
-    elif file_subset == 'second_third':
-        # Load second third of files (files 13-25 for 38 total)
-        num_files_per_third = total_files // 3
-        # First third gets one extra if not evenly divisible
-        first_third_size = num_files_per_third + (1 if total_files % 3 > 0 else 0)
-        # Second third gets one extra if remainder is 2
-        second_third_size = num_files_per_third + (1 if total_files % 3 == 2 else 0)
-        start_idx = first_third_size
-        end_idx = first_third_size + second_third_size
-        numpy_files = numpy_files[start_idx:end_idx]
-        if verbose:
-            print(f"  Loading second third: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
-    elif file_subset == 'third_third':
-        # Load third third of files (files 26-37 for 38 total)
-        num_files_per_third = total_files // 3
-        # Calculate where third third starts
-        first_third_size = num_files_per_third + (1 if total_files % 3 > 0 else 0)
-        second_third_size = num_files_per_third + (1 if total_files % 3 == 2 else 0)
-        start_idx = first_third_size + second_third_size
-        numpy_files = numpy_files[start_idx:]
-        if verbose:
-            print(f"  Loading third third: {len(numpy_files)} of {total_files} files (indices {start_idx}-{total_files-1})")
-    elif file_subset == 'first_fourth':
+    if file_subset == 'first_fourth':
         # Load first fourth of files (files 0-9 for 38 total)
         num_files_per_fourth = total_files // 4
         # First fourth gets one extra if remainder > 0
@@ -243,12 +214,11 @@ def create_simple_train_val_dataloaders(
         if verbose:
             print(f"  Loading all {len(numpy_files)} files")
     else:
-        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_half', 'second_half', 'first_third', 'second_third', 'third_third', 'first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth'")
+        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth'")
     
     # Load selected files and concatenate
     all_arrays = []
     total_sequences = 0
-    num_files_selected = len(numpy_files)  # Save count before potential test mode truncation
     
     for i, file_path in enumerate(numpy_files, 1):
         if verbose and i == 1:
@@ -361,7 +331,7 @@ def create_simple_train_val_dataloaders(
             torch.cuda.synchronize()
             allocated = torch.cuda.memory_allocated() / (1024**3)
             reserved = torch.cuda.memory_reserved() / (1024**3)
-            print(f"GPU: {allocated:.1f}GB allocated")
+            print(f"GPU: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved")
         
         print(f"Batch size: {batch_size} | Train batches: {len(train_loader):,} | Val batches: {len(val_loader):,}")
     
@@ -386,7 +356,8 @@ def calculate_dataloader_stats(
     batch_size: int = 32,
     val_split: float = 0.1,
     test_mode: bool = False,
-    file_subset: str = 'all'
+    file_subset: str = 'all',
+    dataset_source: str = 'wikipedia'
 ) -> Dict:
     """Calculate dataloader statistics without loading actual data.
     
@@ -397,20 +368,32 @@ def calculate_dataloader_stats(
         batch_size: Number of sequences per batch
         val_split: Fraction of data for validation 
         test_mode: Use subset for testing
-        file_subset: Which files to load ('all', 'first_half', 'second_half',
-                     'first_third', 'second_third', 'third_third',
-                     'first_fourth', 'second_fourth', 'third_fourth', 'fourth_fourth')
+        file_subset: Which files to load ('all', 'first_fourth', 'second_fourth',
+                     'third_fourth', 'fourth_fourth')
+        dataset_source: Which dataset to use ('wikipedia' or 'fineweb')
         
     Returns:
         Dictionary with calculated statistics
     """
-    # Determine data directory
-    if test_mode:
-        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_test_dataset")
-        if not data_dir.exists():
-            data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset")
+    # Determine data directory based on dataset source
+    base_path = Path("/home/andrea/Desktop/data/tokenized_datasets")
+    
+    if dataset_source == 'wikipedia':
+        if test_mode:
+            data_dir = base_path / "codellama_test_dataset"
+            if not data_dir.exists():
+                data_dir = base_path / "codellama_full_dataset"
+        else:
+            data_dir = base_path / "codellama_full_dataset"
+    elif dataset_source == 'fineweb':
+        if test_mode:
+            data_dir = base_path / "fineweb_test_dataset"
+            if not data_dir.exists():
+                data_dir = base_path / "fineweb_full_dataset"
+        else:
+            data_dir = base_path / "fineweb_full_dataset"
     else:
-        data_dir = Path("/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset")
+        raise ValueError(f"Invalid dataset_source: {dataset_source}. Must be 'wikipedia' or 'fineweb'")
     
     # Load metadata
     metadata_path = data_dir / "metadata.json"
@@ -428,31 +411,7 @@ def calculate_dataloader_stats(
     # Determine which files based on file_subset
     total_files = len(numpy_files)
     
-    if file_subset == 'first_half':
-        num_files = total_files // 2
-        numpy_files = numpy_files[:num_files]
-    elif file_subset == 'second_half':
-        num_files_first_half = total_files // 2
-        numpy_files = numpy_files[num_files_first_half:]
-    elif file_subset == 'first_third':
-        num_files_per_third = total_files // 3
-        if total_files % 3 > 0:
-            num_files_per_third += 1
-        numpy_files = numpy_files[:num_files_per_third]
-    elif file_subset == 'second_third':
-        num_files_per_third = total_files // 3
-        first_third_size = num_files_per_third + (1 if total_files % 3 > 0 else 0)
-        second_third_size = num_files_per_third + (1 if total_files % 3 == 2 else 0)
-        start_idx = first_third_size
-        end_idx = first_third_size + second_third_size
-        numpy_files = numpy_files[start_idx:end_idx]
-    elif file_subset == 'third_third':
-        num_files_per_third = total_files // 3
-        first_third_size = num_files_per_third + (1 if total_files % 3 > 0 else 0)
-        second_third_size = num_files_per_third + (1 if total_files % 3 == 2 else 0)
-        start_idx = first_third_size + second_third_size
-        numpy_files = numpy_files[start_idx:]
-    elif file_subset == 'first_fourth':
+    if file_subset == 'first_fourth':
         num_files_per_fourth = total_files // 4
         if total_files % 4 > 0:
             num_files_per_fourth += 1
@@ -480,7 +439,7 @@ def calculate_dataloader_stats(
         start_idx = first_fourth_size + second_fourth_size + third_fourth_size
         numpy_files = numpy_files[start_idx:]
     elif file_subset != 'all':
-        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_half', 'second_half', 'first_third', 'second_third', 'third_third', 'first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth'")
+        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth'")
     
     # Calculate total sequences by checking file shapes
     # We can get this from the metadata or by quickly checking file shapes

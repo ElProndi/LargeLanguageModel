@@ -261,10 +261,10 @@ class FastTransformerDecoderLayer(nn.Module):
         self.use_scaled_residuals = use_scaled_residuals
         if use_scaled_residuals:
             self.residual_scale_attn = ScaledResidual(
-                hidden_size, num_layers, layer_idx, learnable=False
+                hidden_size, num_layers, layer_idx, learnable=True
             )
             self.residual_scale_ffn = ScaledResidual(
-                hidden_size, num_layers, layer_idx, learnable=False
+                hidden_size, num_layers, layer_idx, learnable=True
             )
         
         # Gradient checkpointing support

@@ -121,6 +121,10 @@ class Trainer:
         # Get gradient accumulation steps early for correct calculations
         self.gradient_accumulation_steps = self.config['training'].get('gradient_accumulation_steps', 1)
         
+        # Get dataset source from config
+        self.dataset_source = self.config.get('dataset', {}).get('source', 'wikipedia')
+        print(f"Using dataset: {self.dataset_source}")
+        
         # Calculate training steps without loading data (optimized)
         # This avoids loading ~13GB into GPU memory just to count batches
         print("Calculating training steps...", end='')
@@ -130,7 +134,8 @@ class Trainer:
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='first_fourth'
+            file_subset='first_fourth',
+            dataset_source=self.dataset_source
         )
         
         # Get statistics for second fourth
@@ -138,7 +143,8 @@ class Trainer:
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='second_fourth'
+            file_subset='second_fourth',
+            dataset_source=self.dataset_source
         )
         
         # Get statistics for third fourth
@@ -146,7 +152,8 @@ class Trainer:
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='third_fourth'
+            file_subset='third_fourth',
+            dataset_source=self.dataset_source
         )
         
         # Get statistics for fourth fourth
@@ -154,7 +161,8 @@ class Trainer:
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='fourth_fourth'
+            file_subset='fourth_fourth',
+            dataset_source=self.dataset_source
         )
         
         # Calculate batch counts - we have 4 fourths, sum their batches
@@ -234,7 +242,7 @@ class Trainer:
         # No need to call model.to(device) - model is already on GPU
         
         # Enable gradient checkpointing for memory efficiency
-        model.enable_gradient_checkpointing()
+        # model.enable_gradient_checkpointing()  # Temporarily disabled
         
         # Model compilation (commented out by default)
         # Uncomment to enable torch.compile for faster training:
@@ -263,7 +271,8 @@ class Trainer:
             test_mode=self.test_mode,
             verbose=True,
             seed=42,  # Consistent split across runs
-            file_subset=file_subset  # Load only specified fourth
+            file_subset=file_subset,  # Load only specified fourth
+            dataset_source=self.dataset_source  # Use configured dataset source
         )
         
         # Store references
@@ -712,7 +721,8 @@ class Trainer:
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset=saved_subset
+            file_subset=saved_subset,
+            dataset_source=self.dataset_source
         )
         
         steps_in_current_fourth = current_fourth_stats['train_batches'] // self.gradient_accumulation_steps

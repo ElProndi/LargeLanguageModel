@@ -24,8 +24,13 @@ MODULES = {
     },
     "prepare": {
         "script": "dataset_prep.py",
-        "description": "Prepare tokenized datasets for training",
+        "description": "Prepare tokenized Wikipedia datasets for training",
         "args_help": "Options: --test (process subset), --window SIZE (default: 512)"
+    },
+    "fineweb": {
+        "script": "fineweb_prep.py",
+        "description": "Prepare tokenized FineWeb datasets for training",
+        "args_help": "Options: --test (process 10k docs), --window SIZE (default: 512), --batch-size SIZE (default: 10000)"
     },
     "train": {
         "script": "train.py",
@@ -53,10 +58,11 @@ def print_menu():
     print("-" * 40)
     print("1) Raw Cleanup       - Process Wikipedia dumps")
     print("2) Tokenization      - Manage tokenizer operations")
-    print("3) Dataset Prep      - Prepare training datasets")
-    print("4) Training          - Train language model")
-    print("5) Inference         - Generate text interactively")
-    print("6) Quit")
+    print("3) Wikipedia Prep    - Prepare Wikipedia datasets")
+    print("4) FineWeb Prep      - Prepare FineWeb datasets")
+    print("5) Training          - Train language model")
+    print("6) Inference         - Generate text interactively")
+    print("7) Quit")
     print("-" * 40)
 
 
@@ -66,8 +72,9 @@ def get_module_by_number(number):
         1: "cleanup",
         2: "tokenize",
         3: "prepare",
-        4: "train",
-        5: "inference"
+        4: "fineweb",
+        5: "train",
+        6: "inference"
     }
     return mapping.get(number)
 
@@ -134,17 +141,17 @@ def interactive_mode():
             if not choice:
                 continue
                 
-            if choice == "6":
+            if choice == "7":
                 print("\nExiting pipeline router. Goodbye!")
                 return 0
             
             try:
                 choice_num = int(choice)
-                if choice_num < 1 or choice_num > 6:
-                    print("Invalid choice. Please select 1-6.")
+                if choice_num < 1 or choice_num > 7:
+                    print("Invalid choice. Please select 1-7.")
                     continue
             except ValueError:
-                print("Invalid input. Please enter a number 1-6.")
+                print("Invalid input. Please enter a number 1-7.")
                 continue
             
             module_name = get_module_by_number(choice_num)
@@ -198,7 +205,8 @@ Examples:
   python main.py                          # Interactive mode
   python main.py cleanup --test           # Run cleanup in test mode
   python main.py tokenize --encode "text" # Encode text
-  python main.py prepare --window 1024    # Prepare with custom window
+  python main.py prepare --window 1024    # Prepare Wikipedia with custom window
+  python main.py fineweb --test           # Prepare FineWeb in test mode
   python main.py train --test --name exp1 # Train with experiment name
   python main.py train --model-size small # Train small model
   python main.py inference                # Run inference (interactive)
@@ -235,12 +243,26 @@ Examples:
     # Prepare module parser
     prepare_parser = subparsers.add_parser(
         'prepare',
-        help='Prepare tokenized datasets for training'
+        help='Prepare tokenized Wikipedia datasets for training'
     )
     prepare_parser.add_argument('--test', action='store_true',
                                 help='Process subset for testing')
     prepare_parser.add_argument('--window', type=int, default=512,
                                 help='Window size for sequences (default: 512)')
+    
+    # FineWeb module parser
+    fineweb_parser = subparsers.add_parser(
+        'fineweb',
+        help='Prepare tokenized FineWeb datasets for training'
+    )
+    fineweb_parser.add_argument('--test', action='store_true',
+                                help='Test mode: process only 10,000 documents')
+    fineweb_parser.add_argument('--window', type=int, default=512,
+                                help='Context window size in tokens (default: 512)')
+    fineweb_parser.add_argument('--batch-size', type=int, default=10000,
+                                help='Number of documents per batch (default: 10000)')
+    fineweb_parser.add_argument('--max-files', type=int, default=38,
+                                help='Maximum number of output files (default: 38)')
     
     # Train module parser
     train_parser = subparsers.add_parser(

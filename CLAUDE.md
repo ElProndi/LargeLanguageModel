@@ -4,7 +4,11 @@ This file provides guidance to Claude Code when working with the LLM training pi
 
 ## Project Overview
 
-A transformer-based language model training pipeline leveraging the pre-trained CodeLlama tokenizer for superior text and code representation. The pipeline processes Wikipedia data to train language models using modern best practices and state-of-the-art tokenization.
+A transformer-based language model training pipeline leveraging the pre-trained CodeLlama tokenizer for superior text and code representation. The pipeline supports two high-quality data sources:
+- **Wikipedia**: Structured encyclopedic knowledge (50GB, ~15B tokens)
+- **FineWeb**: Diverse, high-quality web content from HuggingFace (27.6GB, 10B tokens)
+
+Both datasets use the same CodeLlama tokenizer and training infrastructure, allowing seamless switching via configuration.
 
 ## Directory Structure
 
@@ -15,8 +19,9 @@ LargeLanguageModel/
 ├── config.json            # Centralized configuration for entire pipeline
 ├── cleaner.py             # Wikipedia data extraction and cleaning
 ├── tokenizer.py           # CodeLlama tokenizer wrapper from HuggingFace
-├── dataset_prep.py        # Dataset tokenization with sliding windows
-├── dataloader.py          # PyTorch DataLoader for efficient training
+├── dataset_prep.py        # Wikipedia dataset tokenization with sliding windows
+├── fineweb_prep.py        # FineWeb dataset streaming and tokenization
+├── dataloader.py          # PyTorch DataLoader for efficient training (supports both datasets)
 ├── model.py               # Transformer language model architecture
 ├── train.py               # Main training loop with mixed precision
 ├── Inference.py           # Interactive text generation from checkpoints
@@ -51,8 +56,17 @@ Desktop/
 │   ├── cleaned_articles/   # Processed text (Unicode preserved)
 │   │   └── cleaned_*.txt   # One article per line format
 │   └── tokenized_datasets/ # Tokenized sequences for training
-│       └── codellama_test_dataset/  # Test mode output with CodeLlama
-│           ├── tokens_*.npy         # NumPy arrays of token sequences
+│       ├── codellama_test_dataset/  # Wikipedia test mode output
+│       │   ├── tokens_*.npy         # NumPy arrays of token sequences
+│       │   └── metadata.json        # Dataset statistics
+│       ├── codellama_full_dataset/  # Wikipedia full dataset
+│       │   ├── tokens_*.npy         # 38 files of tokenized sequences
+│       │   └── metadata.json        # Dataset statistics
+│       ├── fineweb_test_dataset/    # FineWeb test mode output (10k docs)
+│       │   ├── tokens_*.npy         # NumPy arrays of token sequences
+│       │   └── metadata.json        # Dataset statistics
+│       └── fineweb_full_dataset/    # FineWeb full dataset
+│           ├── tokens_*.npy         # Up to 38 files of tokenized sequences
 │           └── metadata.json        # Dataset statistics
 └── LargeLanguageModel/     # Active development directory
 ```
@@ -121,8 +135,8 @@ Desktop/
 - Better performance on code and technical content
 - Automatic caching of downloaded tokenizer
 
-### Phase 3: Dataset Preparation (dataset_prep.py)
-**Purpose**: Tokenize cleaned articles into training sequences with sliding windows
+### Phase 3a: Wikipedia Dataset Preparation (dataset_prep.py)
+**Purpose**: Tokenize cleaned Wikipedia articles into training sequences with sliding windows
 
 **Key Features**:
 - Loads CodeLlama tokenizer (always full 32,016 vocab)
@@ -132,7 +146,7 @@ Desktop/
 - Saves sequences as NumPy uint16 arrays for efficient loading
 
 **Input**: Cleaned articles from `/home/andrea/Desktop/data/cleaned_articles/`
-**Output**: Tokenized sequences in `/home/andrea/Desktop/data/tokenized_datasets/`
+**Output**: Tokenized sequences in `/home/andrea/Desktop/data/tokenized_datasets/codellama_*_dataset/`
 
 **Processing Characteristics**:
 - Test mode: First 10,000 articles only for quick iteration
@@ -142,25 +156,51 @@ Desktop/
 - Metadata generation with compression metrics
 - Outputs to codellama_test_dataset or codellama_full_dataset
 
-### Phase 4: Data Loading (dataloader.py)
-**Purpose**: High-performance PyTorch DataLoader for training with full dataset in RAM/GPU
+### Phase 3b: FineWeb Dataset Preparation (fineweb_prep.py)
+**Purpose**: Stream and tokenize FineWeb-10BT dataset from HuggingFace for training
 
 **Key Features**:
-- Loads entire tokenized dataset into RAM at initialization (~2GB)
-- Optional GPU memory loading for zero-copy training
-- Implements standard PyTorch Dataset interface
-- Automatic concatenation of all tokenized files
-- Memory usage reporting and statistics
+- Streams FineWeb-10BT dataset (10B GPT-2 tokens) without full download
+- Quality filtering using language scores (threshold: 0.65)
+- Filters short documents (< 100 tokens)
+- Uses same CodeLlama tokenizer for compatibility
+- Creates sliding windows matching Wikipedia format
+- Saves as NumPy arrays compatible with existing infrastructure
 
-**Input**: Tokenized sequences from `/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset/`
+**Input**: Streamed from HuggingFace dataset `HuggingFaceFW/fineweb` (sample-10BT)
+**Output**: Tokenized sequences in `/home/andrea/Desktop/data/tokenized_datasets/fineweb_*_dataset/`
+
+**Processing Characteristics**:
+- Test mode: First 10,000 documents for quick iteration
+- Streaming mode: No need to download full 27.6GB dataset
+- Batch processing (default 10,000 documents per batch)
+- Creates up to 38 output files to match Wikipedia structure
+- Real-time progress with quality filtering statistics
+- Compatible sliding window generation (512 tokens, 50% overlap)
+
+### Phase 4: Data Loading (dataloader.py)
+**Purpose**: High-performance PyTorch DataLoader for training with both Wikipedia and FineWeb datasets
+
+**Key Features**:
+- Supports both Wikipedia and FineWeb datasets via `dataset_source` parameter
+- Memory-efficient fourth-by-fourth loading to save VRAM (~20GB per fourth)
+- Train data on GPU for zero-copy access, validation on CPU with pinned memory
+- Implements standard PyTorch Dataset interface
+- Automatic concatenation of tokenized files within each fourth
+
+**Input**: Tokenized sequences from either:
+- Wikipedia: `/home/andrea/Desktop/data/tokenized_datasets/codellama_*_dataset/`
+- FineWeb: `/home/andrea/Desktop/data/tokenized_datasets/fineweb_*_dataset/`
+
 **Output**: PyTorch DataLoader ready for training
 
 **Processing Characteristics**:
+- Dataset selection based on config.json `dataset.source` field
+- Fourth-based loading: splits dataset into 4 parts, loads one at a time
 - Fails fast if dataset is incomplete (missing metadata.json)
 - Direct tensor indexing with no I/O during training
 - Automatic optimization when data is on GPU (num_workers=0)
-- Configurable batch size, shuffling, and worker processes
-- Persistent workers for CPU loading scenarios
+- Consistent train/val split across runs (seed=42)
 
 ### Phase 5: Model Architecture (model.py)
 **Purpose**: Modern transformer-based language model with state-of-the-art optimizations
@@ -361,26 +401,28 @@ Desktop/
 python3 main.py
 
 # Direct CLI execution - for automation and scripting
-python3 main.py cleanup --test              # Run cleanup in test mode
+python3 main.py cleanup --test              # Run Wikipedia cleanup in test mode
 python3 main.py tokenize --encode "text"    # Encode text with tokenizer
-python3 main.py prepare --window 1024       # Prepare dataset with custom window
+python3 main.py prepare --window 1024       # Prepare Wikipedia dataset with custom window
+python3 main.py fineweb --test              # Prepare FineWeb dataset in test mode
 python3 main.py train --test --name exp1    # Train model with experiment name
 python3 main.py inference                   # Launch interactive text generation
 
 # Interactive workflow:
 # 1) Run python3 main.py
-# 2) Select module from menu (1-6)
+# 2) Select module from menu (1-7)
 # 3) Enter optional arguments when prompted
 # 4) Module executes in subprocess
 # 5) Choose to run another module or quit
 
 # Module mapping:
-# 1 → Raw Cleanup (cleaner.py)
+# 1 → Raw Cleanup (cleaner.py) - Wikipedia only
 # 2 → Tokenization (tokenizer.py)
-# 3 → Dataset Prep (dataset_prep.py)
-# 4 → Training (train.py)
-# 5 → Inference (Inference.py)
-# 6 → Quit
+# 3 → Wikipedia Prep (dataset_prep.py)
+# 4 → FineWeb Prep (fineweb_prep.py)
+# 5 → Training (train.py)
+# 6 → Inference (Inference.py)
+# 7 → Quit
 ```
 
 ### Running the Data Cleaner
@@ -414,7 +456,7 @@ python3 tokenizer.py --load tokenizers/codellama_tokenizer
 # Output: tokenizers/codellama_tokenizer/
 ```
 
-### Preparing the Dataset
+### Preparing Wikipedia Dataset
 ```bash
 # Test mode: tokenize first 10,000 articles with CodeLlama
 python3 dataset_prep.py --test
@@ -429,6 +471,42 @@ python3 dataset_prep.py --window 1024
 python3 dataset_prep.py --batch 5000
 
 # Output: /home/andrea/Desktop/data/tokenized_datasets/codellama_*_dataset/
+```
+
+### Preparing FineWeb Dataset
+```bash
+# Test mode: process first 10,000 documents
+python3 fineweb_prep.py --test
+
+# Full dataset: stream and process entire FineWeb-10BT
+python3 fineweb_prep.py
+
+# Custom parameters
+python3 fineweb_prep.py --window 1024 --batch-size 5000 --max-files 20
+
+# Output: /home/andrea/Desktop/data/tokenized_datasets/fineweb_*_dataset/
+
+# Note: FineWeb streams from HuggingFace, no download needed
+# Quality filtering applied automatically (language_score > 0.65)
+```
+
+### Switching Between Datasets for Training
+```bash
+# Edit config.json to switch datasets:
+# For Wikipedia:
+"dataset": {
+  "source": "wikipedia",
+  ...
+}
+
+# For FineWeb:
+"dataset": {
+  "source": "fineweb",
+  ...
+}
+
+# Then train normally - the dataloader will automatically use the selected dataset
+python3 train.py
 ```
 
 ### Creating and Testing the Model
@@ -591,6 +669,23 @@ python3 Inference.py
 ## Configuration System
 
 The `config.json` file centralizes all configuration for the pipeline.
+
+### Dataset Configuration
+```json
+"dataset": {
+  "source": "wikipedia",  // or "fineweb" - selects which dataset to use
+  "wikipedia_test_dir": "/path/to/wikipedia/test",
+  "wikipedia_full_dir": "/path/to/wikipedia/full",
+  "fineweb_test_dir": "/path/to/fineweb/test",
+  "fineweb_full_dir": "/path/to/fineweb/full"
+}
+```
+
+- **source**: Controls which dataset the training pipeline uses
+  - `"wikipedia"`: Use Wikipedia dataset (default, structured encyclopedic content)
+  - `"fineweb"`: Use FineWeb-10BT dataset (diverse web content)
+- Dataset paths are automatically selected based on the source field
+- Both datasets use identical tokenization and training infrastructure
 
 ## Development Guidelines
 

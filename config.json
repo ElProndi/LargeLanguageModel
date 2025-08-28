@@ -65,6 +65,14 @@
     "logging_steps": 10
   },
   
+  "dataset": {
+    "source": "wikipedia",
+    "wikipedia_test_dir": "/home/andrea/Desktop/data/tokenized_datasets/codellama_test_dataset",
+    "wikipedia_full_dir": "/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset",
+    "fineweb_test_dir": "/home/andrea/Desktop/data/tokenized_datasets/fineweb_test_dataset",
+    "fineweb_full_dir": "/home/andrea/Desktop/data/tokenized_datasets/fineweb_full_dataset"
+  },
+  
   "paths": {
     "checkpoint_dir": "checkpoints",
     "log_dir": "logs",
