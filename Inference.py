@@ -298,8 +298,28 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
     # Create model using config from checkpoint
     print_info("Creating model architecture from checkpoint config...")
     
-    # Extract model config
-    model_config = config['model']
+    # Handle both old single-model and new multi-model config formats
+    if 'models' in config:
+        # New multi-model format
+        model_size = checkpoint.get('model_size', None)
+        if not model_size:
+            # If checkpoint doesn't have model_size, prompt user
+            available_sizes = list(config['models'].keys())
+            print_warning("Checkpoint doesn't specify model size.")
+            print(f"Available sizes: {', '.join(available_sizes)}")
+            
+            while True:
+                model_size = input(f"Select model size ({'/'.join(available_sizes)}): ").strip()
+                if model_size in available_sizes:
+                    break
+                print_error(f"Invalid choice. Please enter one of: {', '.join(available_sizes)}")
+        
+        print_info(f"Using '{model_size}' model configuration")
+        model_config = config['models'][model_size]
+    else:
+        # Old single-model format (backward compatibility)
+        model_config = config['model']
+    
     tokenizer_config = config.get('tokenizer', {})
     rope_config = config.get('rope', {})
     

@@ -30,7 +30,7 @@ MODULES = {
     "train": {
         "script": "train.py",
         "description": "Train the transformer language model",
-        "args_help": "Options: --test, --config PATH, --resume CHECKPOINT, --name EXPERIMENT"
+        "args_help": "Options: --test, --model-size [small/medium], --config PATH, --resume CHECKPOINT, --name EXPERIMENT"
     },
     "inference": {
         "script": "Inference.py",
@@ -200,6 +200,7 @@ Examples:
   python main.py tokenize --encode "text" # Encode text
   python main.py prepare --window 1024    # Prepare with custom window
   python main.py train --test --name exp1 # Train with experiment name
+  python main.py train --model-size small # Train small model
   python main.py inference                # Run inference (interactive)
         """
     )
@@ -248,6 +249,8 @@ Examples:
     )
     train_parser.add_argument('--test', action='store_true',
                              help='Run single epoch test')
+    train_parser.add_argument('--model-size', type=str, choices=['small', 'medium'],
+                             help='Model size to use (small or medium)')
     train_parser.add_argument('--config', type=str,
                              help='Path to config file')
     train_parser.add_argument('--resume', type=str,
@@ -295,6 +298,8 @@ Examples:
     elif args.module == 'train':
         if args.test:
             module_args.append('--test')
+        if hasattr(args, 'model_size') and args.model_size:
+            module_args.extend(['--model-size', args.model_size])
         if args.config:
             module_args.extend(['--config', args.config])
         if args.resume:

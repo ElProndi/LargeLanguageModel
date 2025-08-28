@@ -30,6 +30,7 @@ class Trainer:
     def __init__(
         self,
         config_path: str = "config.json",
+        model_size: str = None,
         test_mode: bool = False,
         resume_from: Optional[str] = None,
         experiment_name: Optional[str] = None
@@ -38,15 +39,24 @@ class Trainer:
         
         Args:
             config_path: Path to configuration file
+            model_size: Model size to use ("small" or "medium"). If None, uses default from config.
             test_mode: Use smaller dataset for testing
             resume_from: Path to checkpoint to resume from
             experiment_name: Name for this training run
         """
         print(f"Initializing Transformer Language Model Trainer")
         
+        # Store model size
+        self.model_size = model_size
+        
         # Load configuration
         with open(config_path, 'r') as f:
             self.config = json.load(f)
+        
+        # Display selected model size
+        if 'models' in self.config:
+            actual_model_size = model_size or self.config.get('default_model_size', 'medium')
+            print(f"  • Model size: {actual_model_size}")
         
         self.test_mode = test_mode
         if test_mode:
@@ -216,8 +226,11 @@ class Trainer:
         Returns:
             Configured model (already on GPU from model.py)
         """
-        # Create model - automatically moved to GPU in model.py
-        model = create_model(self.config.get('config_path', 'config.json'))
+        # Create model with specified size - automatically moved to GPU in model.py
+        model = create_model(
+            config_path=self.config.get('config_path', 'config.json'),
+            model_size=self.model_size
+        )
         # No need to call model.to(device) - model is already on GPU
         
         # Model compilation (commented out by default)
@@ -565,6 +578,7 @@ class Trainer:
             'scheduler_state_dict': self.scheduler.state_dict(),
             'best_val_loss': self.best_val_loss,
             'config': self.config,
+            'model_size': self.model_size or self.config.get('default_model_size', 'medium'),
             'metrics_summary': self.metrics.get_summary()
         }
         
@@ -598,13 +612,41 @@ class Trainer:
         if 'config' in checkpoint:
             saved_config = checkpoint['config']
             
+            # Get model sizes
+            checkpoint_model_size = checkpoint.get('model_size', None)
+            current_model_size = self.model_size or self.config.get('default_model_size', 'medium')
+            
+            # Check if model sizes match
+            if checkpoint_model_size and checkpoint_model_size != current_model_size:
+                print(f"\n  ⚠️  WARNING: Model size mismatch!")
+                print(f"  Checkpoint was trained with '{checkpoint_model_size}' model")
+                print(f"  Current model size: '{current_model_size}'")
+                response = input("\n  Continue anyway? (y/n): ")
+                if response.lower() != 'y':
+                    print("  Checkpoint loading cancelled.")
+                    sys.exit(1)
+            
             # Check critical model architecture parameters
+            # Handle both old single-model and new multi-model config formats
             model_params = ['vocab_size', 'hidden_size', 'num_layers', 'num_heads', 'max_position_embeddings']
             mismatches = []
             
+            # Get saved model config (handle both formats)
+            if 'models' in saved_config:
+                saved_model_size = checkpoint_model_size or saved_config.get('default_model_size', 'medium')
+                saved_model_config = saved_config['models'].get(saved_model_size, {})
+            else:
+                saved_model_config = saved_config.get('model', {})
+            
+            # Get current model config (handle both formats)
+            if 'models' in self.config:
+                current_model_config = self.config['models'].get(current_model_size, {})
+            else:
+                current_model_config = self.config.get('model', {})
+            
             for param in model_params:
-                saved_val = saved_config['model'].get(param)
-                current_val = self.config['model'].get(param)
+                saved_val = saved_model_config.get(param)
+                current_val = current_model_config.get(param)
                 if saved_val != current_val:
                     mismatches.append(f"    {param}: checkpoint={saved_val}, current={current_val}")
             
@@ -938,6 +980,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train transformer language model")
     parser.add_argument('--config', type=str, default='config.json',
                        help='Path to configuration file')
+    parser.add_argument('--model-size', type=str, choices=['small', 'medium'], default=None,
+                       help='Model size to use (small or medium). Defaults to config setting.')
     parser.add_argument('--test', action='store_true',
                        help='Run in test mode with smaller dataset')
     parser.add_argument('--resume', type=str, default=None,
@@ -950,6 +994,7 @@ def main():
     # Create trainer and start training
     trainer = Trainer(
         config_path=args.config,
+        model_size=args.model_size,
         test_mode=args.test,
         resume_from=args.resume,
         experiment_name=args.name

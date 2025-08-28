@@ -652,13 +652,14 @@ class TransformerLM(nn.Module):
         }
 
 
-def create_model(config_path: str = "config.json") -> TransformerLM:
+def create_model(config_path: str = "config.json", model_size: str = None) -> TransformerLM:
     """
     Create a transformer language model from configuration file.
     Model will be automatically moved to GPU if available.
     
     Args:
         config_path: Path to the configuration JSON file
+        model_size: Model size to use ("small" or "medium"). If None, uses default from config.
         
     Returns:
         Initialized TransformerLM model (on GPU if available)
@@ -676,8 +677,26 @@ def create_model(config_path: str = "config.json") -> TransformerLM:
     with open(config_path, 'r') as f:
         config = json.load(f)
     
-    # Extract model configuration
-    model_config = config['model']
+    # Handle model size selection
+    if 'models' in config:
+        # New multi-model config format
+        available_sizes = list(config['models'].keys())
+        
+        # Use provided model_size or fall back to default
+        if model_size is None:
+            model_size = config.get('default_model_size', 'medium')
+        
+        # Validate model size
+        if model_size not in available_sizes:
+            raise ValueError(f"Invalid model size '{model_size}'. Available sizes: {available_sizes}")
+        
+        print(f"📊 Loading '{model_size}' model configuration")
+        model_config = config['models'][model_size]
+    else:
+        # Backward compatibility with old single-model format
+        if model_size is not None:
+            print(f"⚠️  Warning: Config file uses old format. Ignoring model_size parameter.")
+        model_config = config['model']
     tokenizer_config = config.get('tokenizer', {})
     rope_config = config.get('rope', {})
     
@@ -713,8 +732,13 @@ def create_model(config_path: str = "config.json") -> TransformerLM:
 
 
 if __name__ == "__main__":
-    # Test model creation
-    model = create_model()
+    import sys
+    
+    # Test model creation - accept model size from command line
+    model_size = sys.argv[1] if len(sys.argv) > 1 else None
+    if model_size:
+        print(f"Testing with model size: {model_size}")
+    model = create_model(model_size=model_size)
     
     # Display detailed parameter breakdown
     params = model.get_num_params()
