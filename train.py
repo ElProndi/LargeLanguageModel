@@ -582,24 +582,6 @@ class Trainer:
                 torch.save(checkpoint, best_path)
         
         print(f"\n💾 Checkpoint saved: {checkpoint_path.name}")
-        
-        # Clean up old checkpoints (keep only last 5)
-        self._cleanup_checkpoints()
-    
-    def _cleanup_checkpoints(self, keep_last: int = 10):
-        """Remove old checkpoints, keeping only the most recent ones.
-        
-        Args:
-            keep_last: Number of recent checkpoints to keep (default: 10)
-        """
-        # Find all step checkpoints
-        checkpoints = list(self.checkpoint_dir.glob("checkpoint_step_*.pt"))
-        checkpoints.sort(key=lambda x: int(x.stem.split('_')[-1]))
-        
-        # Remove old checkpoints
-        if len(checkpoints) > keep_last:
-            for checkpoint in checkpoints[:-keep_last]:
-                checkpoint.unlink()
     
     def load_checkpoint(self, checkpoint_path: str):
         """Load training checkpoint.

@@ -469,7 +469,7 @@ def get_generation_params() -> Dict[str, any]:
     params = {}
     
     # Max length
-    default_max_length = 200
+    default_max_length = 512
     max_length_input = input(f"  Max length (default {default_max_length}): ")
     params['max_length'] = int(max_length_input) if max_length_input else default_max_length
     
@@ -1056,7 +1056,7 @@ def run_multi_model_inference(models_dict: Dict[str, Tuple[TransformerLM, Wikipe
                 generation_params = get_generation_params()
             else:
                 generation_params = {
-                    'max_length': 200,
+                    'max_length': 512,
                     'temperature': 0.8,
                     'top_k': 50,
                     'top_p': 0.95

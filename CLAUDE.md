@@ -11,6 +11,7 @@ A transformer-based language model training pipeline leveraging the pre-trained 
 ```
 LargeLanguageModel/
 ├── CLAUDE.md              # This file - project guidance
+├── main.py                # Pipeline router and orchestrator
 ├── config.json            # Centralized configuration for entire pipeline
 ├── cleaner.py             # Wikipedia data extraction and cleaning
 ├── tokenizer.py           # CodeLlama tokenizer wrapper from HuggingFace
@@ -23,7 +24,9 @@ LargeLanguageModel/
 │   ├── __init__.py        # Package initialization
 │   ├── logging_utils.py   # Dual logging (TensorBoard + JSON)
 │   ├── metrics.py         # Metrics tracking and smoothing
-│   └── scheduler.py       # Learning rate scheduling
+│   ├── scheduler.py       # Learning rate scheduling
+│   ├── rope.py            # Rotary Position Embeddings (RoPE)
+│   └── activations.py     # Modern activation functions (SwiGLU, GeGLU)
 ├── tokenizers/            # Saved tokenizer models
 │   └── codellama_tokenizer/  # CodeLlama tokenizer (32016 vocab)
 ├── checkpoints/           # Model checkpoints (hierarchical structure)
@@ -48,16 +51,36 @@ Desktop/
 │   ├── cleaned_articles/   # Processed text (Unicode preserved)
 │   │   └── cleaned_*.txt   # One article per line format
 │   └── tokenized_datasets/ # Tokenized sequences for training
-│       ├── codellama_test_dataset/  # Test mode output with CodeLlama
-│       │   ├── tokens_*.npy         # NumPy arrays of token sequences
-│       │   └── metadata.json        # Dataset statistics
-│       └── codellama_full_dataset/  # Full dataset with CodeLlama
-│           ├── tokens_*.npy         # NumPy arrays (38 files)
-│           └── metadata.json        # Overall statistics
+│       └── codellama_test_dataset/  # Test mode output with CodeLlama
+│           ├── tokens_*.npy         # NumPy arrays of token sequences
+│           └── metadata.json        # Dataset statistics
 └── LargeLanguageModel/     # Active development directory
 ```
 
 ## Pipeline Architecture
+
+### Pipeline Orchestration (main.py)
+**Purpose**: Unified router and orchestrator for all pipeline modules, providing both interactive and CLI interfaces
+
+**Key Features**:
+- Interactive menu mode for user-friendly pipeline navigation
+- Direct CLI mode with argparse for automation and scripting
+- Module registry with centralized configuration
+- Subprocess execution for clean memory isolation between stages
+- Intelligent error handling distinguishing user interrupts from failures
+- Argument forwarding to individual modules
+- Session continuity with "run another module" prompts
+
+**Input**: User selection via interactive menu or CLI arguments
+**Output**: Executes selected pipeline modules with specified parameters
+
+**Processing Characteristics**:
+- Two execution modes: interactive (default) and CLI (with arguments)
+- Maps module names to script files: cleanup→cleaner.py, tokenize→tokenizer.py, etc.
+- Return code interpretation: 0 (success), 130 (Ctrl-C), other (errors)
+- Subprocess isolation prevents memory leaks between pipeline stages
+- Supports module chaining in interactive mode
+- Preserves module independence while providing unified access
 
 ### Phase 1: Data Cleaning (cleaner.py)
 **Purpose**: Extract and clean Wikipedia articles from raw JSONL dumps
@@ -140,21 +163,30 @@ Desktop/
 - Persistent workers for CPU loading scenarios
 
 ### Phase 5: Model Architecture (model.py)
-**Purpose**: Transformer-based language model using native PyTorch modules
+**Purpose**: Modern transformer-based language model with state-of-the-art optimizations
 
 **Key Features**:
-- Uses PyTorch's native `nn.TransformerDecoder` for efficiency
-- Learned positional embeddings (GPT-2 style)
+- **FastMultiHeadAttention** with Grouped Query Attention (GQA) for reduced memory usage
+- **Rotary Position Embeddings (RoPE)** for better length extrapolation (parameter-free)
+- **SwiGLU activation** function for improved gradient flow
+- **RMSNorm** option alongside LayerNorm for faster training
+- **Flash Attention** enforcement for optimal performance on modern GPUs
+- **Pre-norm architecture** for better training stability
 - Tied input/output embeddings to reduce parameters
-- Support for autoregressive text generation
-- Configurable architecture via config.json
 - Vocabulary size of 32,016 tokens (CodeLlama)
+
+**Architecture Components**:
+- **Grouped Query Attention (GQA)**: Reduces KV heads while maintaining Q heads (e.g., 16 Q heads, 4 KV heads = 4:1 ratio)
+- **RoPE**: Encodes positions through rotation matrices, no learned parameters
+- **SwiGLU FFN**: Three projection matrices (gate, up, down) with Swish gating
+- **Memory Optimizations**: bfloat16 autocast, TorchInductor compilation support
 
 **Generation Capabilities**:
 - Temperature-based sampling
 - Top-k and Top-p (nucleus) sampling
 - Batch generation with proper EOS handling
 - Support for padding and attention masks
+- bfloat16 inference for speed
 
 ### Phase 6: Model Training (train.py)
 **Purpose**: Complete training pipeline with GPU optimization and monitoring
@@ -179,7 +211,25 @@ Desktop/
 - Automatic checkpoint management
 - Graceful interruption handling with state preservation
 
-### Phase 7: Utilities (utils/)
+### Phase 7: Advanced Model Components (utils/rope.py, utils/activations.py)
+**Purpose**: Modern transformer building blocks for state-of-the-art performance
+
+**Components**:
+1. **Rotary Position Embeddings** (rope.py):
+   - Parameter-free position encoding through rotation matrices
+   - Better length extrapolation than learned embeddings
+   - TorchInductor-compatible real-valued operations
+   - Support for Grouped Query Attention (different Q/KV head counts)
+   - Configurable theta and scaling factors
+
+2. **Modern Activation Functions** (activations.py):
+   - **SwiGLU**: Swish-gated linear unit used in LLaMA/PaLM
+   - **GeGLU**: GELU-gated variant
+   - **ReGLU**: ReLU-gated variant
+   - Three-matrix architecture (gate, up, down projections)
+   - Automatic intermediate size calculation for optimal GPU utilization
+
+### Phase 8: Utilities (utils/)
 **Purpose**: Modular components for training infrastructure
 
 **Components**:
@@ -202,7 +252,7 @@ Desktop/
    - Resume-friendly state management
    - Integration with PyTorch optimizers
 
-### Phase 8: Model Inference (Inference.py)
+### Phase 9: Model Inference (Inference.py)
 **Purpose**: Interactive text generation using trained model checkpoints with single and multi-model comparison modes
 
 **Key Features**:
@@ -248,14 +298,90 @@ Desktop/
 - **Top-k**: Limits vocabulary to top k tokens (default: 50, 0 to disable)
 - **Top-p**: Nucleus sampling threshold (default: 0.95, 1.0 to disable)
 
+### Phase 10: Model Benchmarking (benchmark.py)
+**Purpose**: Comprehensive evaluation framework for language models using standard NLP metrics
+
+**Key Features**:
+- **Four Evaluation Metrics**:
+  - Perplexity measurement on WikiText-103 dataset
+  - Text completion quality via BLEU and ROUGE scores
+  - Next token prediction accuracy (Top-1, Top-5, Top-10)
+  - Commonsense reasoning through multiple-choice scenarios
+- **Dataset Management**:
+  - Automatic downloading and caching of benchmark datasets
+  - WikiText-103 for perplexity evaluation
+  - LAMBADA for context-dependent word prediction
+  - HellaSwag-style tasks for commonsense reasoning
+  - Fallback samples for offline evaluation
+- **Multi-Model Comparison**:
+  - Side-by-side evaluation of multiple checkpoints
+  - Automatic best-score highlighting
+  - Performance ranking across all metrics
+- **Result Persistence**:
+  - JSON output for programmatic analysis
+  - Human-readable text summaries
+  - Timestamped result files for tracking progress
+
+**Input**: Trained model checkpoints from `checkpoints/` directory
+**Output**: Comprehensive evaluation metrics saved to `benchmark_results/`
+
+**Processing Characteristics**:
+- Memory-efficient evaluation with disabled gradients
+- Teacher-forcing for perplexity calculation
+- Autoregressive generation for completion tasks
+- Configurable sample sizes (quick/standard/comprehensive)
+- Real-time progress tracking with tqdm
+- Automatic GPU/CPU optimization
+- Batch processing for efficient evaluation
+
+**Benchmark Configurations**:
+- **Quick**: 50 WikiText, 20 LAMBADA, 10 HellaSwag samples (~5 minutes)
+- **Standard**: 100 WikiText, 50 LAMBADA, 20 HellaSwag samples (~10 minutes)
+- **Comprehensive**: 200 WikiText, 100 LAMBADA, 50 HellaSwag samples (~20 minutes)
+
+**Metrics Explained**:
+- **Perplexity**: Lower is better; measures prediction uncertainty
+- **BLEU**: 0-100 score; measures n-gram precision in generated text
+- **ROUGE**: 0-100 score; evaluates recall of important phrases
+- **Top-k Accuracy**: Percentage where correct token is in top-k predictions
+- **Commonsense**: Percentage of correctly chosen completions
+
 ### Upcoming Phases (To Be Implemented)
 
-**Phase 9: Inference Server**
+**Phase 10: Inference Server**
 - REST API for text generation
 - Streaming generation support
 - Model quantization for deployment
 
 ## Usage
+
+### Using the Pipeline Router (main.py)
+```bash
+# Interactive mode - user-friendly menu navigation
+python3 main.py
+
+# Direct CLI execution - for automation and scripting
+python3 main.py cleanup --test              # Run cleanup in test mode
+python3 main.py tokenize --encode "text"    # Encode text with tokenizer
+python3 main.py prepare --window 1024       # Prepare dataset with custom window
+python3 main.py train --test --name exp1    # Train model with experiment name
+python3 main.py inference                   # Launch interactive text generation
+
+# Interactive workflow:
+# 1) Run python3 main.py
+# 2) Select module from menu (1-6)
+# 3) Enter optional arguments when prompted
+# 4) Module executes in subprocess
+# 5) Choose to run another module or quit
+
+# Module mapping:
+# 1 → Raw Cleanup (cleaner.py)
+# 2 → Tokenization (tokenizer.py)
+# 3 → Dataset Prep (dataset_prep.py)
+# 4 → Training (train.py)
+# 5 → Inference (Inference.py)
+# 6 → Quit
+```
 
 ### Running the Data Cleaner
 ```bash
@@ -388,6 +514,38 @@ tensorboard --logdir logs/tensorboard
 # - Raw metrics in logs/raw_metrics/
 ```
 
+### Running Benchmarks
+```bash
+# Run benchmark evaluation through Inference.py
+python3 Inference.py
+# Select option 3: Benchmark models
+# Choose configuration: quick/standard/comprehensive
+# Results saved to benchmark_results/
+
+# Or use benchmark module directly
+python3 -c "
+from benchmark import ModelBenchmark, format_benchmark_results
+from model import create_model
+from tokenizer import WikipediaTokenizer
+import torch
+
+# Load models
+models_dict = {
+    'model_latest': (model1, tokenizer1),
+    'model_best': (model2, tokenizer2)
+}
+
+# Run benchmarks
+benchmark = ModelBenchmark()
+results = benchmark.run_full_benchmark(models_dict)
+print(format_benchmark_results(results))
+"
+
+# View saved results
+ls -la benchmark_results/
+cat benchmark_results/benchmark_*.txt
+```
+
 ### Running Inference
 ```bash
 # Run interactive inference with trained model
@@ -432,34 +590,7 @@ python3 Inference.py
 
 ## Configuration System
 
-The `config.json` file centralizes all configuration for the pipeline:
-
-```json
-{
-  "model": {
-    "vocab_size": 32016,  // CodeLlama vocabulary size
-    "hidden_size": 512,
-    "num_layers": 32,
-    "num_heads": 16,
-    "max_position_embeddings": 512,
-    "dropout": 0.1,
-    "attention_dropout": 0.1,
-    "layer_norm_eps": 1e-5,
-    "initializer_range": 0.02,
-    "use_cache": true
-  },
-  "tokenizer": {
-    "bos_token_id": 1,  // CodeLlama <s> token
-    "eos_token_id": 2,  // CodeLlama </s> token
-    "unk_token_id": 0,  // CodeLlama <unk> token
-    "pad_token_id": 2   // Reuses EOS token for padding
-  },
-  "paths": {
-    "tokenizer_dir": "tokenizers/codellama_tokenizer",
-    "dataset_dir": "/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset"
-  }
-}
-```
+The `config.json` file centralizes all configuration for the pipeline.
 
 ## Development Guidelines
 
@@ -485,30 +616,6 @@ The pipeline implements strict error handling:
 - No automatic fallbacks that hide problems
 - Progress state preserved on interruption
 
-## Next Steps
-1. Extend inference capabilities
-   - REST API for text generation
-   - Streaming generation support
-   - Web-based interface
-   - Model serving optimizations
-
-2. Optimization and scaling
-   - Model quantization for deployment
-   - Multi-GPU training support
-   - Distributed data parallel training
-   - Flash attention integration
-
 ---
 
 *This document will be updated as new components are implemented.*
-
-## Recent Updates
-
-### CodeLlama Tokenizer Integration (Latest)
-- Replaced custom BPE tokenizer with pre-trained CodeLlama tokenizer
-- Vocabulary increased from 16,384 to 32,016 tokens
-- Added full Unicode support (no longer ASCII-only)
-- Improved code tokenization with CodeLlama's optimizations
-- Special token IDs updated: BOS=1, EOS=2, UNK=0, PAD=2
-- New dataset paths: codellama_test_dataset and codellama_full_dataset
-- **Note**: Existing models trained with the old tokenizer are incompatible

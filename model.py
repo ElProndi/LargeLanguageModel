@@ -705,6 +705,7 @@ def create_model(config_path: str = "config.json") -> TransformerLM:
     
     # Get parameter count for logging
     params = model.get_num_params()
+    
     model = torch.compile(model)
     print(f"Model created: {params['total']:,} parameters")
 
@@ -765,26 +766,3 @@ if __name__ == "__main__":
     ffn_label = "SwiGLU" if config.get('use_swiglu', True) else "FFN"
     print(f"     - {ffn_label:10} {(params['ffn_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
     print("\n" + "="*60)
-    
-    # Get model device for creating test inputs
-    device = next(model.parameters()).device
-    
-    # Test forward pass with dummy input
-    dummy_input = torch.randint(0, 32016, (2, 128), device=device)  # batch_size=2, seq_len=128
-    print(f"\nTesting forward pass with input shape: {dummy_input.shape}")
-    print(f"Input device: {dummy_input.device}")
-    
-    # Use bfloat16 for Flash Attention compatibility
-    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-        outputs = model(dummy_input, labels=dummy_input)
-    print(f"Output logits shape: {outputs['logits'].shape}")
-    print(f"Loss: {outputs['loss'].item():.4f}")
-    
-    # Test generation
-    print(f"\nTesting generation...")
-    prompt = torch.randint(0, 32016, (1, 10), device=device)  # Single prompt of 10 tokens
-    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-        generated = model.generate(prompt, max_length=50, temperature=0.8, top_k=50)
-    print(f"Generated shape: {generated.shape}")
-    
-    print(f"\nAll tests passed!")
