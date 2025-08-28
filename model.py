@@ -7,6 +7,7 @@ using native PyTorch modules for efficiency and simplicity.
 """
 
 import json
+import math
 import os
 from typing import Optional, Union, Tuple
 
@@ -25,6 +26,36 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 # Enable TF32 for better performance
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision('medium')
+
+class ScaledResidual(nn.Module):
+    """
+    Learnable or fixed residual scaling to prevent gradient explosion in deep networks.
+    Scales residual connections by a factor that depends on layer depth.
+    """
+    
+    def __init__(
+        self,
+        hidden_size: int,
+        num_layers: int,
+        layer_idx: int,
+        learnable: bool = False
+    ):
+        super().__init__()
+        
+        # Calculate optimal scaling factor based on layer depth
+        # Scale by 1/sqrt(2n) where n = layer index + 1
+        scale_value = math.sqrt(1.0 / (2 * (layer_idx + 1)))
+        
+        if learnable:
+            # Learnable scaling parameter (initialized to optimal value)
+            self.scale = nn.Parameter(torch.ones(1) * scale_value)
+        else:
+            # Fixed scaling based on layer depth
+            self.register_buffer('scale', torch.tensor(scale_value))
+    
+    def forward(self, x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+        """Apply scaled residual connection."""
+        return residual + self.scale * x
 
 class FastMultiHeadAttention(nn.Module):
     """
@@ -64,8 +95,14 @@ class FastMultiHeadAttention(nn.Module):
         self.k_proj = nn.Linear(hidden_size, self.num_kv_heads * self.head_dim, bias=bias)
         self.v_proj = nn.Linear(hidden_size, self.num_kv_heads * self.head_dim, bias=bias)
         
+        # Mark attention projections for specialized initialization
+        self.q_proj._is_attention_qkv = True
+        self.k_proj._is_attention_qkv = True
+        self.v_proj._is_attention_qkv = True
+        
         # Output projection
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
+        self.o_proj._is_attention_output = True
         
         self.dropout = dropout
         
@@ -161,6 +198,7 @@ class FastTransformerDecoderLayer(nn.Module):
     """
     Optimized Transformer Decoder Layer using FastMultiHeadAttention with RoPE.
     Uses SwiGLU activation and pre-norm architecture for better training stability.
+    Includes residual scaling and gradient checkpointing support.
     """
     
     def __init__(
@@ -178,7 +216,11 @@ class FastTransformerDecoderLayer(nn.Module):
         max_position_embeddings: int = 512,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
-        force_flash_attention: bool = True
+        force_flash_attention: bool = True,
+        layer_idx: int = 0,
+        num_layers: int = 1,
+        use_scaled_residuals: bool = True,
+        use_gradient_checkpointing: bool = False
     ):
         super().__init__()
         
@@ -219,15 +261,28 @@ class FastTransformerDecoderLayer(nn.Module):
         
         # Dropout
         self.dropout = nn.Dropout(dropout)
+        
+        # Residual scaling for deep networks
+        self.use_scaled_residuals = use_scaled_residuals
+        if use_scaled_residuals:
+            self.residual_scale_attn = ScaledResidual(
+                hidden_size, num_layers, layer_idx, learnable=False
+            )
+            self.residual_scale_ffn = ScaledResidual(
+                hidden_size, num_layers, layer_idx, learnable=False
+            )
+        
+        # Gradient checkpointing support
+        self.use_gradient_checkpointing = use_gradient_checkpointing
     
-    def forward(
+    def _attention_block(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         is_causal: bool = True
     ) -> torch.Tensor:
+        """Attention sub-block for gradient checkpointing."""
         # Pre-norm architecture: LayerNorm before attention
-        residual = hidden_states
         hidden_states = self.norm1(hidden_states)
         
         # Self-attention
@@ -237,10 +292,12 @@ class FastTransformerDecoderLayer(nn.Module):
             is_causal=is_causal
         )
         hidden_states = self.dropout(hidden_states)
-        hidden_states = residual + hidden_states
         
-        # Feed-forward network with pre-norm
-        residual = hidden_states
+        return hidden_states
+    
+    def _ffn_block(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Feed-forward sub-block for gradient checkpointing."""
+        # Pre-norm
         hidden_states = self.norm2(hidden_states)
         
         if self.use_swiglu:
@@ -253,7 +310,66 @@ class FastTransformerDecoderLayer(nn.Module):
             hidden_states = self.fc2(hidden_states)
             hidden_states = self.dropout(hidden_states)
         
-        hidden_states = residual + hidden_states
+        return hidden_states
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        is_causal: bool = True
+    ) -> torch.Tensor:
+        # Gradient checkpointing logic
+        if self.use_gradient_checkpointing and self.training:
+            # Checkpoint attention block
+            residual = hidden_states
+            attn_output = torch.utils.checkpoint.checkpoint(
+                self._attention_block,
+                hidden_states,
+                attention_mask,
+                is_causal,
+                use_reentrant=False
+            )
+            
+            # Apply residual with optional scaling
+            if self.use_scaled_residuals:
+                hidden_states = self.residual_scale_attn(attn_output, residual)
+            else:
+                hidden_states = residual + attn_output
+            
+            # Checkpoint FFN block
+            residual = hidden_states
+            ffn_output = torch.utils.checkpoint.checkpoint(
+                self._ffn_block,
+                hidden_states,
+                use_reentrant=False
+            )
+            
+            # Apply residual with optional scaling
+            if self.use_scaled_residuals:
+                hidden_states = self.residual_scale_ffn(ffn_output, residual)
+            else:
+                hidden_states = residual + ffn_output
+        else:
+            # Normal forward pass without checkpointing
+            # Attention block
+            residual = hidden_states
+            attn_output = self._attention_block(hidden_states, attention_mask, is_causal)
+            
+            # Apply residual with optional scaling
+            if self.use_scaled_residuals:
+                hidden_states = self.residual_scale_attn(attn_output, residual)
+            else:
+                hidden_states = residual + attn_output
+            
+            # FFN block
+            residual = hidden_states
+            ffn_output = self._ffn_block(hidden_states)
+            
+            # Apply residual with optional scaling
+            if self.use_scaled_residuals:
+                hidden_states = self.residual_scale_ffn(ffn_output, residual)
+            else:
+                hidden_states = residual + ffn_output
         
         return hidden_states
 
@@ -279,7 +395,9 @@ class FastTransformerDecoder(nn.Module):
         max_position_embeddings: int = 512,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
-        force_flash_attention: bool = True
+        force_flash_attention: bool = True,
+        use_scaled_residuals: bool = True,
+        use_gradient_checkpointing: bool = False
     ):
         super().__init__()
         
@@ -302,9 +420,13 @@ class FastTransformerDecoder(nn.Module):
                 max_position_embeddings=max_position_embeddings,
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling,
-                force_flash_attention=force_flash_attention
+                force_flash_attention=force_flash_attention,
+                layer_idx=i,
+                num_layers=num_layers,
+                use_scaled_residuals=use_scaled_residuals,
+                use_gradient_checkpointing=use_gradient_checkpointing
             )
-            for _ in range(num_layers)
+            for i in range(num_layers)
         ])
         
         # Final layer norm - use RMSNorm or LayerNorm based on config
@@ -351,7 +473,9 @@ class TransformerLM(nn.Module):
         layer_norm_eps: float = 1e-5,
         initializer_range: float = 0.02,
         use_cache: bool = True,
-        pad_token_id: int = 2
+        pad_token_id: int = 2,
+        use_scaled_residuals: bool = True,
+        use_gradient_checkpointing: bool = False
     ):
         super().__init__()
         
@@ -380,7 +504,9 @@ class TransformerLM(nn.Module):
             'layer_norm_eps': layer_norm_eps,
             'initializer_range': initializer_range,
             'use_cache': use_cache,
-            'pad_token_id': pad_token_id
+            'pad_token_id': pad_token_id,
+            'use_scaled_residuals': use_scaled_residuals,
+            'use_gradient_checkpointing': use_gradient_checkpointing
         }
         
         # Token embeddings only (RoPE handles position encoding)
@@ -405,7 +531,9 @@ class TransformerLM(nn.Module):
             max_position_embeddings=max_position_embeddings,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
-            force_flash_attention=force_flash_attention
+            force_flash_attention=force_flash_attention,
+            use_scaled_residuals=use_scaled_residuals,
+            use_gradient_checkpointing=use_gradient_checkpointing
         )
         
         # Language modeling head (always tied with input embeddings)
@@ -422,18 +550,176 @@ class TransformerLM(nn.Module):
             self.cuda()
     
     def _init_weights(self, module):
-        """Initialize model weights."""
+        """Initialize model weights with enhanced, module-specific strategies."""
+        
+        # Calculate depth-dependent scaling for output projections
+        num_layers = self.config['num_layers']
+        depth_scale = 1.0 / math.sqrt(2 * num_layers) if num_layers > 1 else 1.0
+        
         if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=self.config['initializer_range'])
+            # Get the parent module name for context
+            parent_name = module.__class__.__name__ if hasattr(module, '__class__') else ''
+            
+            # Check if this is part of attention mechanism
+            if hasattr(module, '_is_attention_qkv'):
+                # Query, Key, Value projections - use scaled initialization
+                fan_in = module.weight.size(1)
+                fan_out = module.weight.size(0)
+                std = math.sqrt(2.0 / (fan_in + fan_out))
+                module.weight.data.normal_(mean=0.0, std=std)
+                
+            elif hasattr(module, '_is_attention_output'):
+                # Attention output projection - scale by depth
+                std = self.config['initializer_range'] * depth_scale
+                module.weight.data.normal_(mean=0.0, std=std)
+                
+            elif isinstance(module.weight, nn.Parameter) and module.out_features > module.in_features * 2:
+                # Likely FFN up/gate projection - use Xavier uniform
+                nn.init.xavier_uniform_(module.weight, gain=1.0)
+                
+            elif isinstance(module.weight, nn.Parameter) and module.in_features > module.out_features * 2:
+                # Likely FFN down projection - scale by depth
+                std = self.config['initializer_range'] * depth_scale
+                module.weight.data.normal_(mean=0.0, std=std)
+                
+            else:
+                # Default initialization for other linear layers
+                module.weight.data.normal_(mean=0.0, std=self.config['initializer_range'])
+            
+            # Initialize bias to zero if present
             if module.bias is not None:
                 module.bias.data.zero_()
+                
         elif isinstance(module, nn.Embedding):
+            # Token embeddings with normal distribution
             module.weight.data.normal_(mean=0.0, std=self.config['initializer_range'])
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
+                
+        elif isinstance(module, (nn.LayerNorm, nn.RMSNorm)):
+            # Handle both LayerNorm and RMSNorm
+            if hasattr(module, 'bias') and module.bias is not None:
+                module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+            
+        elif isinstance(module, SwiGLU):
+            # Special initialization for SwiGLU components
+            # Gate and up projections: Xavier uniform
+            if hasattr(module, 'gate_proj'):
+                nn.init.xavier_uniform_(module.gate_proj.weight, gain=1.0)
+                if module.gate_proj.bias is not None:
+                    module.gate_proj.bias.data.zero_()
+                    
+            if hasattr(module, 'up_proj'):
+                nn.init.xavier_uniform_(module.up_proj.weight, gain=1.0)
+                if module.up_proj.bias is not None:
+                    module.up_proj.bias.data.zero_()
+                    
+            # Down projection: scaled by depth
+            if hasattr(module, 'down_proj'):
+                std = self.config['initializer_range'] * depth_scale
+                module.down_proj.weight.data.normal_(mean=0.0, std=std)
+                if module.down_proj.bias is not None:
+                    module.down_proj.bias.data.zero_()
+    
+    def enable_gradient_checkpointing(self):
+        """Enable gradient checkpointing for memory-efficient training."""
+        # Set flag for all decoder layers
+        for layer in self.transformer.layers:
+            layer.use_gradient_checkpointing = True
+        
+        # Update config
+        self.config['use_gradient_checkpointing'] = True
+        
+        # Log memory savings estimate
+        if self.training:
+            seq_len = self.config['max_position_embeddings']
+            batch_size = 8  # Example batch size
+            memory_saved_mb = self._estimate_memory_savings(batch_size, seq_len)
+            print(f"✓ Gradient checkpointing enabled")
+            print(f"  Estimated memory savings: ~{memory_saved_mb:.1f} MB per batch")
+            print(f"  Trade-off: ~30% slower training for 40-50% memory reduction")
+    
+    def disable_gradient_checkpointing(self):
+        """Disable gradient checkpointing for faster training."""
+        for layer in self.transformer.layers:
+            layer.use_gradient_checkpointing = False
+        
+        # Update config
+        self.config['use_gradient_checkpointing'] = False
+        print("✓ Gradient checkpointing disabled")
+    
+    def _estimate_memory_savings(self, batch_size: int, seq_len: int) -> float:
+        """Estimate memory savings from gradient checkpointing."""
+        hidden_size = self.config['hidden_size']
+        num_layers = self.config['num_layers']
+        intermediate_size = self.config.get('intermediate_size', hidden_size * 4)
+        
+        # Activations per layer (attention + FFN intermediates)
+        # Attention: Q, K, V, attention scores, attention output
+        # FFN: intermediate activations
+        acts_per_layer = (
+            batch_size * seq_len * hidden_size * 4 *  # Attention intermediates
+            (5 + intermediate_size / hidden_size)      # FFN intermediates
+        )
+        
+        # With checkpointing: only store sqrt(n) activations
+        saved = acts_per_layer * num_layers * (1 - 1/math.sqrt(num_layers))
+        return saved / (1024 * 1024)  # Convert to MB
+    
+    def configure_gradient_checkpointing(self, policy: str = "adaptive", memory_threshold_gb: float = 10.0):
+        """
+        Configure gradient checkpointing based on policy.
+        
+        Policies:
+        - 'none': No checkpointing
+        - 'all': Checkpoint all layers
+        - 'adaptive': Enable based on model size and available memory
+        - 'alternating': Checkpoint every other layer
+        
+        Args:
+            policy: Checkpointing policy to use
+            memory_threshold_gb: Memory threshold for adaptive policy
+        """
+        if policy == "none":
+            self.disable_gradient_checkpointing()
+        
+        elif policy == "all":
+            self.enable_gradient_checkpointing()
+        
+        elif policy == "adaptive":
+            # Check available GPU memory
+            if torch.cuda.is_available():
+                free_memory_gb = torch.cuda.mem_get_info()[0] / (1024**3)
+                model_memory_gb = sum(p.numel() * 4 for p in self.parameters()) / (1024**3)
+                
+                # Enable if model is large relative to available memory
+                if model_memory_gb > free_memory_gb * 0.3 or model_memory_gb > memory_threshold_gb:
+                    self.enable_gradient_checkpointing()
+                    print(f"Auto-enabled gradient checkpointing")
+                    print(f"  Model size: {model_memory_gb:.1f}GB")
+                    print(f"  Free memory: {free_memory_gb:.1f}GB")
+                else:
+                    self.disable_gradient_checkpointing()
+                    print(f"Gradient checkpointing not needed")
+                    print(f"  Model size: {model_memory_gb:.1f}GB")
+                    print(f"  Free memory: {free_memory_gb:.1f}GB")
+            else:
+                # CPU mode - checkpointing less useful
+                self.disable_gradient_checkpointing()
+        
+        elif policy == "alternating":
+            # Checkpoint every other layer for balanced trade-off
+            for i, layer in enumerate(self.transformer.layers):
+                layer.use_gradient_checkpointing = (i % 2 == 0)
+            
+            self.config['use_gradient_checkpointing'] = 'alternating'
+            print(f"✓ Alternating gradient checkpointing enabled")
+            print(f"  Checkpointed layers: {len([l for i, l in enumerate(self.transformer.layers) if i % 2 == 0])}/{len(self.transformer.layers)}")
+            print(f"  Trade-off: ~15% slower training for 20-25% memory reduction")
+        
+        else:
+            raise ValueError(f"Unknown checkpointing policy: {policy}")
     
     def forward(
         self,
