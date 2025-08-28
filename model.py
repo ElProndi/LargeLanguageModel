@@ -72,8 +72,7 @@ class FastMultiHeadAttention(nn.Module):
         bias: bool = True,
         max_position_embeddings: int = 512,
         rope_theta: float = 10000.0,
-        rope_scaling: float = 1.0,
-        force_flash_attention: bool = True
+        rope_scaling: float = 1.0
     ):
         super().__init__()
         assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
@@ -115,8 +114,6 @@ class FastMultiHeadAttention(nn.Module):
             device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         )
         
-        # Flash Attention settings
-        self.force_flash_attention = force_flash_attention
     
     def forward(
         self,
@@ -153,8 +150,8 @@ class FastMultiHeadAttention(nn.Module):
             k = k.repeat_interleave(self.num_groups, dim=1)
             v = v.repeat_interleave(self.num_groups, dim=1)
         
-        # Force Flash Attention backend for optimal performance on RTX 3080 Ti
-        if self.force_flash_attention and torch.cuda.is_available():
+        # Use Flash Attention backend for optimal performance when available
+        if torch.cuda.is_available():
             try:
                 # Try to use Flash Attention backend
                 with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
@@ -176,7 +173,7 @@ class FastMultiHeadAttention(nn.Module):
                         scale=self.scale
                     )
         else:
-            # Default behavior - let PyTorch choose the best backend
+            # CPU fallback - let PyTorch choose the best backend
             attn_output = F.scaled_dot_product_attention(
                 q, k, v,
                 attn_mask=attention_mask,
@@ -216,7 +213,6 @@ class FastTransformerDecoderLayer(nn.Module):
         max_position_embeddings: int = 512,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
-        force_flash_attention: bool = True,
         layer_idx: int = 0,
         num_layers: int = 1,
         use_scaled_residuals: bool = True,
@@ -236,8 +232,7 @@ class FastTransformerDecoderLayer(nn.Module):
             bias=bias,
             max_position_embeddings=max_position_embeddings,
             rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
-            force_flash_attention=force_flash_attention
+            rope_scaling=rope_scaling
         )
         
         # Feed-forward network - use SwiGLU or standard FFN
@@ -395,7 +390,6 @@ class FastTransformerDecoder(nn.Module):
         max_position_embeddings: int = 512,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
-        force_flash_attention: bool = True,
         use_scaled_residuals: bool = True,
         use_gradient_checkpointing: bool = False
     ):
@@ -420,7 +414,6 @@ class FastTransformerDecoder(nn.Module):
                 max_position_embeddings=max_position_embeddings,
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling,
-                force_flash_attention=force_flash_attention,
                 layer_idx=i,
                 num_layers=num_layers,
                 use_scaled_residuals=use_scaled_residuals,
@@ -467,7 +460,6 @@ class TransformerLM(nn.Module):
         max_position_embeddings: int = 512,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
-        force_flash_attention: bool = True,
         dropout: float = 0.1,
         attention_dropout: float = 0.1,
         layer_norm_eps: float = 1e-5,
@@ -480,7 +472,7 @@ class TransformerLM(nn.Module):
         super().__init__()
         
         # Calculate intermediate size as 4x hidden size (standard transformer pattern)
-        intermediate_size = hidden_size * 4
+        intermediate_size = hidden_size * 3
         
         # Default num_kv_heads to num_heads if not specified (backward compatibility)
         if num_kv_heads is None:
@@ -498,7 +490,6 @@ class TransformerLM(nn.Module):
             'max_position_embeddings': max_position_embeddings,
             'rope_theta': rope_theta,
             'rope_scaling': rope_scaling,
-            'force_flash_attention': force_flash_attention,
             'dropout': dropout,
             'attention_dropout': attention_dropout,
             'layer_norm_eps': layer_norm_eps,
@@ -531,7 +522,6 @@ class TransformerLM(nn.Module):
             max_position_embeddings=max_position_embeddings,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
-            force_flash_attention=force_flash_attention,
             use_scaled_residuals=use_scaled_residuals,
             use_gradient_checkpointing=use_gradient_checkpointing
         )
@@ -957,7 +947,7 @@ def create_model(config_path: str = "config.json", model_size: str = None) -> Tr
     else:
         # Log Flash Attention availability
         print(f"🚀 GPU detected: {torch.cuda.get_device_name()}")
-        print("   Flash Attention will be enforced for optimal performance")
+        print("   Flash Attention will be used for optimal performance")
     
     # Load configuration
     with open(config_path, 'r') as f:
@@ -999,7 +989,6 @@ def create_model(config_path: str = "config.json", model_size: str = None) -> Tr
         max_position_embeddings=model_config['max_position_embeddings'],
         rope_theta=rope_config.get('theta', 10000.0),
         rope_scaling=rope_config.get('scaling_factor', 1.0),
-        force_flash_attention=model_config.get('force_flash_attention', True),
         dropout=model_config['dropout'],
         attention_dropout=model_config['attention_dropout'],
         layer_norm_eps=model_config['layer_norm_eps'],
@@ -1043,7 +1032,7 @@ if __name__ == "__main__":
     print(f"   Using RMSNorm: {config['use_rms_norm']}")
     print(f"   Using SwiGLU: {config.get('use_swiglu', True)}")
     print(f"   Using RoPE: Yes (θ={config.get('rope_theta', 10000.0)})")
-    print(f"   Force Flash Attention: {config.get('force_flash_attention', True)}")
+    print(f"   Flash Attention: Enabled (auto-detect)")
     
     print("\n📦 Embeddings")
     print(f"   └── Token Embeddings:       {params['embedding']:>12,} params")

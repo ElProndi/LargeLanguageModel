@@ -338,7 +338,6 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
         # RoPE configuration
         rope_theta=rope_config.get('theta', 10000.0),
         rope_scaling=rope_config.get('scaling_factor', 1.0),
-        force_flash_attention=model_config.get('force_flash_attention', True),
         # Disable dropout for inference
         dropout=0.0,
         attention_dropout=0.0,
