@@ -455,6 +455,7 @@ class TransformerLM(nn.Module):
         num_layers: int = 6,
         num_heads: int = 6,
         num_kv_heads: Optional[int] = None,
+        intermediate_size: Optional[int] = None,  # Allow explicit intermediate size
         use_rms_norm: bool = True,
         use_swiglu: bool = True,
         max_position_embeddings: int = 512,
@@ -465,14 +466,16 @@ class TransformerLM(nn.Module):
         layer_norm_eps: float = 1e-5,
         initializer_range: float = 0.02,
         use_cache: bool = True,
-        pad_token_id: int = 2,
+        pad_token_id: int = 32000,  # Changed from 2 (EOS) to 32000 (dedicated padding)
+        eos_token_id: int = 2,
         use_scaled_residuals: bool = True,
         use_gradient_checkpointing: bool = False
     ):
         super().__init__()
         
-        # Calculate intermediate size as 4x hidden size (standard transformer pattern)
-        intermediate_size = hidden_size * 3
+        # Calculate intermediate size if not provided
+        if intermediate_size is None:
+            intermediate_size = hidden_size * 3
         
         # Default num_kv_heads to num_heads if not specified (backward compatibility)
         if num_kv_heads is None:
@@ -496,6 +499,7 @@ class TransformerLM(nn.Module):
             'initializer_range': initializer_range,
             'use_cache': use_cache,
             'pad_token_id': pad_token_id,
+            'eos_token_id': eos_token_id,
             'use_scaled_residuals': use_scaled_residuals,
             'use_gradient_checkpointing': use_gradient_checkpointing
         }
@@ -752,11 +756,56 @@ class TransformerLM(nn.Module):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             
-            # Compute cross-entropy loss
+            # Create mask for positions after the first EOS token
+            eos_token_id = self.config.get('eos_token_id', 2)
+            
+            # Find positions of EOS tokens (before shifting)
+            eos_positions = (labels == eos_token_id).float()
+            
+            # Use cumsum to identify positions after the first EOS
+            # cumsum will be 0 before first EOS, 1 at first EOS, >1 after
+            eos_cumsum = eos_positions.cumsum(dim=1)
+            
+            # For the loss calculation after shifting:
+            # - We want to predict UP TO and INCLUDING the first EOS
+            # - We DON'T want to predict anything AFTER the first EOS
+            
+            # Create base mask: True only before any EOS
+            before_eos_mask = (eos_cumsum == 0)
+            
+            # After shifting for next-token prediction:
+            # Position i in shift space predicts token at position i+1 in original space
+            shift_mask = before_eos_mask[..., :-1].contiguous()
+            
+            # Find the SINGLE position that predicts the first EOS
+            # This is where cumsum transitions from 0 to 1
+            # Check if current position has cumsum==0 AND next position has cumsum==1
+            eos_predictor = (eos_cumsum[..., :-1] == 0) & (eos_cumsum[..., 1:] == 1)
+            
+            # Combine: include positions before EOS AND the position predicting EOS
+            shift_mask = shift_mask | eos_predictor
+            
+            # Replace labels after first EOS with -100 (ignore_index)
+            # This ensures the model learns to predict EOS but not what comes after
+            masked_labels = torch.where(
+                shift_mask,
+                shift_labels,
+                torch.tensor(-100, device=shift_labels.device)
+            )
+            
+            # Also mask out actual padding tokens (ID 32000 or from config)
+            pad_token_id = self.config.get('pad_token_id', 32000)
+            masked_labels = torch.where(
+                shift_labels == pad_token_id,
+                torch.tensor(-100, device=shift_labels.device),
+                masked_labels
+            )
+            
+            # Compute cross-entropy loss with proper masking
             loss = F.cross_entropy(
                 shift_logits.view(-1, self.config['vocab_size']),
-                shift_labels.view(-1),
-                ignore_index=self.config['pad_token_id']
+                masked_labels.view(-1),
+                ignore_index=-100
             )
         
         if return_dict:
@@ -775,7 +824,7 @@ class TransformerLM(nn.Module):
         temperature: float = 1.0,
         top_k: Optional[int] = None,
         top_p: Optional[float] = None,
-        eos_token_id: int = 1,
+        eos_token_id: Optional[int] = None,
         pad_token_id: Optional[int] = None
     ) -> torch.Tensor:
         """
@@ -795,6 +844,7 @@ class TransformerLM(nn.Module):
         """
         self.eval()
         pad_token_id = pad_token_id or self.config['pad_token_id']
+        eos_token_id = eos_token_id or self.config.get('eos_token_id', 2)
         
         # Initialize with input
         generated = input_ids
@@ -994,7 +1044,8 @@ def create_model(config_path: str = "config.json", model_size: str = None) -> Tr
         layer_norm_eps=model_config['layer_norm_eps'],
         initializer_range=model_config['initializer_range'],
         use_cache=model_config['use_cache'],
-        pad_token_id=tokenizer_config.get('pad_token_id', 2)
+        pad_token_id=tokenizer_config.get('pad_token_id', 32000),
+        eos_token_id=tokenizer_config.get('eos_token_id', 2)
     )
     
     # Get parameter count for logging

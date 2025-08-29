@@ -11,6 +11,10 @@ import orjson
 from numpy.lib.stride_tricks import as_strided
 from tokenizer import WikipediaTokenizer
 from tqdm import tqdm
+from collections import deque
+import threading
+from queue import Queue
+from threading import Lock
 
 # Try to import datasets library
 try:
@@ -33,12 +37,17 @@ class FineWebTokenizer:
         self.window_size = window_size
         self.tokenizer = None
         self.vocab_size = None
+        self.stride = window_size // 2  # Pre-compute stride
         
         # Statistics tracking
         self.total_documents = 0
         self.total_tokens = 0
         self.total_sequences = 0
         self.filtered_documents = 0
+        
+        # Optimization: larger accumulation buffer for better tokenizer parallelization
+        self.optimal_batch_size = 288000  # Sized for 10B tokens in 38 files (~915 tokens/doc average)
+        self.target_tokens_per_file = 263_000_000  # 10B tokens / 38 files
         
     def load_tokenizer(self):
         """Load CodeLlama tokenizer."""
@@ -61,6 +70,22 @@ class FineWebTokenizer:
         print(f"Loaded CodeLlama tokenizer")
         print(f"Vocabulary size: {self.vocab_size}")
     
+    def calculate_num_sequences(self, token_lengths: List[int]) -> int:
+        """Calculate total number of sequences that will be generated.
+        
+        Args:
+            token_lengths: List of token counts for each document
+            
+        Returns:
+            Total number of sequences that will be created
+        """
+        # Vectorized calculation for better performance
+        total = sum(
+            (length - self.window_size) // self.stride + 1 
+            for length in token_lengths if length >= self.window_size
+        )
+        return total
+    
     def create_sliding_windows(self, token_ids: np.ndarray) -> np.ndarray:
         """Create sliding window sequences using NumPy stride tricks for maximum performance.
         
@@ -76,36 +101,237 @@ class FineWebTokenizer:
         if n_tokens < self.window_size:
             return np.array([], dtype=np.int16).reshape(0, self.window_size)
         
-        # Calculate stride and number of windows
-        stride = self.window_size // 2
-        n_windows = (n_tokens - self.window_size) // stride + 1
+        # Use pre-computed stride
+        n_windows = (n_tokens - self.window_size) // self.stride + 1
         
         # Use stride tricks to create windows without copying data
         windows = as_strided(
             token_ids,
             shape=(n_windows, self.window_size),
-            strides=(token_ids.strides[0] * stride, token_ids.strides[0])
+            strides=(token_ids.strides[0] * self.stride, token_ids.strides[0])
         )
         
         # Return contiguous copy for efficient saving
         return np.ascontiguousarray(windows, dtype=np.int16)
     
+    
+    def stream_fineweb_dataset_with_prefetch(self,
+                                            max_documents: Optional[int] = None,
+                                            language_score_threshold: float = 0.65,
+                                            min_tokens: int = 100,
+                                            progress_update_freq: int = 1000,
+                                            prefetch_size: int = 1000) -> Iterator[str]:
+        """Stream FineWeb dataset with prefetching for optimal performance.
+        
+        Uses a separate thread to prefetch documents while processing current batch.
+        
+        Args:
+            max_documents: Maximum number of documents to process
+            language_score_threshold: Minimum language score
+            min_tokens: Minimum tokens required
+            progress_update_freq: Progress bar update frequency
+            prefetch_size: Number of documents to prefetch
+            
+        Yields:
+            Document text strings that pass filters
+        """
+        # Use the regular streaming with a prefetch buffer
+        buffer = Queue(maxsize=prefetch_size)
+        stop_event = threading.Event()
+        
+        def prefetch_worker():
+            """Worker thread to prefetch documents."""
+            try:
+                for doc in self.stream_fineweb_dataset(
+                    max_documents=max_documents,
+                    language_score_threshold=language_score_threshold,
+                    min_tokens=min_tokens,
+                    progress_update_freq=progress_update_freq
+                ):
+                    if stop_event.is_set():
+                        break
+                    buffer.put(doc)
+                buffer.put(None)  # Signal end of stream
+            except Exception as e:
+                buffer.put(e)  # Pass exception to main thread
+        
+        # Start prefetch thread
+        thread = threading.Thread(target=prefetch_worker, daemon=True)
+        thread.start()
+        
+        # Yield from buffer
+        while True:
+            item = buffer.get()
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
+        
+        stop_event.set()
+        thread.join(timeout=1)
+    
+    def stream_fineweb_dataset_parallel(self,
+                                        max_documents: Optional[int] = None,
+                                        language_score_threshold: float = 0.65,
+                                        min_tokens: int = 100,
+                                        progress_update_freq: int = 2000,
+                                        num_workers: int = 4,
+                                        queue_size: int = 20000) -> Iterator[str]:
+        """Stream FineWeb dataset using parallel shard workers.
+
+        Spawns multiple worker threads that each iterate a disjoint shard of the
+        streaming dataset to increase throughput. The main thread consumes from
+        a queue and yields filtered documents while updating progress in batches.
+
+        Args:
+            max_documents: Maximum accepted documents to yield (None for unlimited)
+            language_score_threshold: Minimum language score to accept
+            min_tokens: Minimum estimated tokens (via char length proxy)
+            progress_update_freq: Progress bar update interval (accepted docs)
+            num_workers: Number of parallel shard workers
+            queue_size: Max size of the shared queue
+
+        Yields:
+            Document text strings that pass filters
+        """
+        print("\nStreaming FineWeb-10BT dataset in parallel shards...")
+        print(f"Workers: {num_workers}, queue size: {queue_size}")
+        print(f"Filters: language_score > {language_score_threshold}, min_tokens > {min_tokens}")
+
+        # Shared structures
+        buffer: Queue = Queue(maxsize=queue_size)
+        stop_event = threading.Event()
+        filtered_lock = Lock()
+        seen_lock = Lock()
+        docs_seen = 0
+
+        # Precompute fast filter threshold in characters
+        min_len_chars = int(min_tokens * 4.5)
+
+        def worker(worker_id: int):
+            nonlocal docs_seen
+            try:
+                ds = load_dataset(
+                    "HuggingFaceFW/fineweb",
+                    name="sample-10BT",
+                    split="train",
+                    streaming=True
+                )
+                # Use contiguous shards so each worker gets a disjoint slice
+                ds = ds.shard(num_shards=num_workers, index=worker_id, contiguous=True)
+
+                local_seen = 0
+                for example in ds:
+                    if stop_event.is_set():
+                        break
+
+                    local_seen += 1
+
+                    # Fast filter: language score
+                    if example.get("language_score", 0) <= language_score_threshold:
+                        with filtered_lock:
+                            self.filtered_documents += 1
+                        continue
+
+                    text = example.get("text", "")
+                    if not text:
+                        with filtered_lock:
+                            self.filtered_documents += 1
+                        continue
+
+                    # Fast proxy for token length
+                    if len(text) < min_len_chars:
+                        with filtered_lock:
+                            self.filtered_documents += 1
+                        continue
+
+                    # Push accepted document (light trim to drop line endings)
+                    try:
+                        buffer.put(text.strip(), timeout=0.5)
+                    except Exception:
+                        # If queue is full and stopping, exit quickly
+                        if stop_event.is_set():
+                            break
+                        buffer.put(text.strip())  # blocking put
+
+                with seen_lock:
+                    docs_seen += local_seen
+            except Exception as e:
+                # Forward error to consumer
+                buffer.put(e)
+            finally:
+                # Signal this worker finished
+                buffer.put(None)
+
+        # Start workers
+        threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(num_workers)]
+        for t in threads:
+            t.start()
+
+        # Consumer loop
+        completed_workers = 0
+        yielded = 0
+        update_counter = 0
+        pbar = tqdm(total=max_documents, desc="Documents processed", unit="docs",
+                    mininterval=0.5, smoothing=0.3)
+        try:
+            while True:
+                item = buffer.get()
+                if item is None:
+                    completed_workers += 1
+                    if completed_workers >= num_workers:
+                        break
+                    continue
+                if isinstance(item, Exception):
+                    # Re-raise worker exception
+                    raise item
+
+                yield item
+                yielded += 1
+                update_counter += 1
+
+                if update_counter >= progress_update_freq:
+                    pbar.update(update_counter)
+                    update_counter = 0
+
+                if max_documents and yielded >= max_documents:
+                    # Stop early: signal workers and drain remaining sentinels
+                    stop_event.set()
+                    break
+        finally:
+            if update_counter > 0:
+                pbar.update(update_counter)
+            pbar.close()
+            # Ensure workers stop and finish
+            stop_event.set()
+            for t in threads:
+                t.join(timeout=1)
+        
+        print("\nStreaming complete:")
+        print(f"  Documents seen (approx): {docs_seen:,}")
+        print(f"  Documents filtered: {self.filtered_documents:,}")
+        print(f"  Documents yielded: {yielded:,}")
+    
     def stream_fineweb_dataset(self, 
                               max_documents: Optional[int] = None,
                               language_score_threshold: float = 0.65,
-                              min_tokens: int = 100) -> Iterator[str]:
-        """Stream FineWeb dataset from HuggingFace.
+                              min_tokens: int = 100,
+                              progress_update_freq: int = 1000) -> Iterator[str]:
+        """Stream FineWeb dataset from HuggingFace with optimized performance.
         
         Args:
             max_documents: Maximum number of documents to process (None for all)
             language_score_threshold: Minimum language score for English quality
             min_tokens: Minimum tokens required in a document
+            progress_update_freq: How often to update progress bar (default every 1000 docs)
             
         Yields:
             Document text strings that pass filters
         """
         print(f"\nStreaming FineWeb-10BT dataset from HuggingFace...")
         print(f"Filters: language_score > {language_score_threshold}, min_tokens > {min_tokens}")
+        print(f"Progress updates every {progress_update_freq:,} documents")
         
         # Load dataset in streaming mode to avoid downloading all 27.6GB
         dataset = load_dataset(
@@ -117,36 +343,49 @@ class FineWebTokenizer:
         
         documents_yielded = 0
         documents_seen = 0
+        update_counter = 0
         
-        # Create progress bar
-        pbar = tqdm(total=max_documents, desc="Documents processed", unit="docs")
+        # Create progress bar with less frequent updates
+        pbar = tqdm(total=max_documents, desc="Documents processed", unit="docs", 
+                   mininterval=0.5, smoothing=0.3)  # Reduce update frequency
         
         for example in dataset:
             documents_seen += 1
             
-            # Apply quality filters
-            if example.get('language_score', 0) <= language_score_threshold:
+            # OPTIMIZATION: Check language score first (fastest filter)
+            language_score = example.get('language_score', 0)
+            if language_score <= language_score_threshold:
                 self.filtered_documents += 1
                 continue
             
-            text = example.get('text', '').strip()
+            # OPTIMIZATION: Avoid strip() until necessary
+            text = example.get('text', '')
             if not text:
                 self.filtered_documents += 1
                 continue
             
-            # Quick token count estimation (rough, actual will be done during tokenization)
-            estimated_tokens = len(text.split()) * 1.5  # Rough estimate
-            if estimated_tokens < min_tokens:
+            # OPTIMIZATION: Skip expensive token estimation - just check minimum length
+            # Assuming average 4.5 chars per token (rough but fast)
+            if len(text) < min_tokens * 4.5:
                 self.filtered_documents += 1
                 continue
             
-            yield text
+            # Only strip when yielding (lazy evaluation)
+            yield text.strip() if text else text
             documents_yielded += 1
-            pbar.update(1)
+            update_counter += 1
+            
+            # OPTIMIZATION: Batch progress updates
+            if update_counter >= progress_update_freq:
+                pbar.update(update_counter)
+                update_counter = 0
             
             if max_documents and documents_yielded >= max_documents:
                 break
         
+        # Final progress update
+        if update_counter > 0:
+            pbar.update(update_counter)
         pbar.close()
         
         print(f"\nStreaming complete:")
@@ -154,28 +393,43 @@ class FineWebTokenizer:
         print(f"  Documents filtered: {self.filtered_documents:,}")
         print(f"  Documents yielded: {documents_yielded:,}")
     
+    
     def process_fineweb(self, 
                        output_dir: Path,
                        test_mode: bool = False,
-                       batch_size: int = 10000,
-                       max_files: int = 38):  # Match Wikipedia's 38 files
+                       batch_size: Optional[int] = None,  # Auto-calculated if None
+                       max_files: int = 38,  # Match Wikipedia's 38 files
+                       target_total_tokens: int = 10_000_000_000,  # 10B tokens target
+                       workers: int = 0):
         """Process FineWeb dataset and create tokenized sequences.
         
         Args:
             output_dir: Directory to save tokenized sequences
-            test_mode: If True, only process 10,000 documents for testing
-            batch_size: Number of documents to accumulate before saving
+            test_mode: If True, only process 10,000 documents for testing  
+            batch_size: Number of documents per batch (auto-calculated if None)
             max_files: Maximum number of output files to create
+            target_total_tokens: Target total tokens to process (default 10B)
         """
         # Create output directory
         output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Auto-calculate batch size for target tokens if not specified
+        if batch_size is None:
+            # Based on observed ~915 tokens per document average
+            avg_tokens_per_doc = 915
+            total_docs_needed = target_total_tokens // avg_tokens_per_doc
+            batch_size = total_docs_needed // max_files
+            print(f"Auto-calculated batch size: {batch_size:,} documents per file")
+            print(f"(Target: {target_total_tokens/1e9:.1f}B tokens in {max_files} files)")
         
         print(f"\n{'='*60}")
         print(f"FineWeb Dataset Tokenization Pipeline")
         print(f"{'='*60}")
         print(f"Mode: {'TEST' if test_mode else 'FULL'}")
+        print(f"Target: {target_total_tokens/1e9:.1f}B tokens")
         print(f"Window size: {self.window_size} tokens")
-        print(f"Batch size: {batch_size:,} documents")
+        print(f"Batch size: {batch_size:,} documents/file")
+        print(f"Max files: {max_files}")
         print(f"Output directory: {output_dir}")
         print(f"{'='*60}")
         
@@ -195,14 +449,38 @@ class FineWebTokenizer:
         current_file_idx = 0
         all_stats = []
         
-        # Stream documents from FineWeb
-        document_stream = self.stream_fineweb_dataset(
-            max_documents=max_documents,
-            language_score_threshold=0.65,
-            min_tokens=100
-        )
+        # Stream documents from FineWeb with optimized settings
+        # Use prefetching for better performance in full mode
+        use_prefetch = not test_mode
+        if not test_mode and (workers and workers > 1):
+            print(f"Using parallel streaming with {workers} workers...")
+            document_stream = self.stream_fineweb_dataset_parallel(
+                max_documents=max_documents,
+                language_score_threshold=0.65,
+                min_tokens=100,
+                progress_update_freq=2000,
+                num_workers=workers,
+                queue_size=workers * 8000
+            )
+        elif use_prefetch:
+            print("Using prefetched streaming for optimal performance...")
+            document_stream = self.stream_fineweb_dataset_with_prefetch(
+                max_documents=max_documents,
+                language_score_threshold=0.65,
+                min_tokens=100,
+                progress_update_freq=1000,  # Batch progress updates
+                prefetch_size=5000  # Prefetch buffer size
+            )
+        else:
+            document_stream = self.stream_fineweb_dataset(
+                max_documents=max_documents,
+                language_score_threshold=0.65,
+                min_tokens=100,
+                progress_update_freq=1000  # Batch progress updates
+            )
         
         print(f"\nTokenizing and creating sequences...")
+        print(f"Using optimized batch size: {batch_size:,} documents")
         batch_start_time = time.time()
         
         for doc_idx, document in enumerate(document_stream):
@@ -210,8 +488,8 @@ class FineWebTokenizer:
             
             # Process batch when it reaches batch_size
             if len(current_batch) >= batch_size:
-                # Process and save current batch
-                file_stats = self._process_and_save_batch(
+                # Process and save current batch with optimized two-pass strategy
+                file_stats = self._process_and_save_batch_optimized(
                     current_batch, 
                     current_file_idx, 
                     output_dir,
@@ -231,7 +509,7 @@ class FineWebTokenizer:
         
         # Process remaining documents in the last batch
         if current_batch:
-            file_stats = self._process_and_save_batch(
+            file_stats = self._process_and_save_batch_optimized(
                 current_batch,
                 current_file_idx,
                 output_dir,
@@ -294,23 +572,19 @@ class FineWebTokenizer:
         """
         print(f"\n  Processing batch {file_idx} ({len(documents):,} documents)...")
         
-        # Get EOS token from the tokenizer
-        eos_token = self.tokenizer.tokenizer.eos_token  # "</s>"
-        
-        # Append EOS token to each document for proper boundaries
-        documents_with_eos = [doc + eos_token for doc in documents]
-        
-        # Batch encode all documents
+        # Batch encode all documents WITHOUT auto-added specials
         print(f"    Tokenizing {len(documents):,} documents...")
-        encoded_batch = self.tokenizer.encode(documents_with_eos, add_special_tokens=True)
+        special_ids = self.tokenizer.get_special_token_ids()
+        bos_token_id = special_ids["bos_token_id"]
+        eos_token_id = special_ids["eos_token_id"]
+        core_encoded = self.tokenizer.encode(documents, add_special_tokens=False)
+        # Manually add BOS/EOS IDs deterministically
+        encoded_batch = [[bos_token_id] + ids + [eos_token_id] for ids in core_encoded]
         
-        # Convert to list of objects with 'ids' attribute for compatibility
-        encodings = [type('Encoding', (), {'ids': ids})() for ids in encoded_batch]
-        
-        # Calculate total sequences needed for pre-allocation
-        token_lengths = [len(encoding.ids) for encoding in encodings]
+        # Work directly with token IDs - no wrapper objects needed
+        token_lengths = [len(ids) for ids in encoded_batch]
         total_sequences = sum(
-            (length - self.window_size) // (self.window_size // 2) + 1 
+            (length - self.window_size) // self.stride + 1 
             for length in token_lengths if length >= self.window_size
         )
         
@@ -324,36 +598,34 @@ class FineWebTokenizer:
                 "processing_time": time.time() - batch_start_time
             }
         
-        # Pre-allocate the sequences array
+        # Create sliding windows for all documents
         print(f"    Creating {total_sequences:,} sliding windows...")
-        all_sequences = np.zeros((total_sequences, self.window_size), dtype=np.int16)
+        all_windows = []
         
-        # Fill the pre-allocated array with sliding windows
-        current_idx = 0
-        batch_documents = 0
-        batch_tokens = 0
-        batch_sequences = 0
-        
-        for encoding in encodings:
+        for token_ids in encoded_batch:
             # Convert to NumPy array
-            token_ids = np.array(encoding.ids, dtype=np.int16)
+            token_array = np.array(token_ids, dtype=np.int16)
             
             # Create sliding windows
-            windows = self.create_sliding_windows(token_ids)
+            windows = self.create_sliding_windows(token_array)
             
-            if len(windows) > 0:
-                n_windows = len(windows)
-                all_sequences[current_idx:current_idx + n_windows] = windows
-                current_idx += n_windows
-                batch_sequences += n_windows
-            
-            batch_documents += 1
-            batch_tokens += len(token_ids)
+            if windows.shape[0] > 0:
+                all_windows.append(windows)
+        
+        if all_windows:
+            all_sequences = np.vstack(all_windows)
+            batch_sequences = all_sequences.shape[0]
+        else:
+            all_sequences = np.array([], dtype=np.int16).reshape(0, self.window_size)
+            batch_sequences = 0
+        
+        batch_documents = len(documents)
+        batch_tokens = sum(token_lengths)
         
         # Save the sequences
         output_path = output_dir / f"tokens_{file_idx}.npy"
         np.save(output_path, all_sequences)
-        print(f"    Saved: {output_path}")
+        print(f"    Saving to: {output_path}")
         
         # Update global statistics
         self.total_documents += batch_documents
@@ -375,6 +647,139 @@ class FineWebTokenizer:
         print(f"    Time: {elapsed:.1f}s ({stats['docs_per_sec']:.0f} docs/sec)")
         
         return stats
+    
+    def _process_and_save_batch_optimized(self, 
+                                        documents: List[str], 
+                                        file_idx: int,
+                                        output_dir: Path,
+                                        batch_start_time: float) -> Dict[str, Any]:
+        """Process a batch of documents using optimized two-pass strategy.
+        
+        This implementation follows the highly optimized pattern from dataset_prep.py:
+        1. Load all documents into memory
+        2. Tokenize entire batch at once for maximum parallelization
+        3. Calculate total sequences needed (Pass 1)
+        4. Pre-allocate entire array
+        5. Fill array with sliding windows (Pass 2)
+        
+        Args:
+            documents: List of document texts
+            file_idx: Index for output file naming
+            output_dir: Directory to save output
+            batch_start_time: Time when batch processing started
+            
+        Returns:
+            Statistics dictionary for this batch
+        """
+        print(f"\n  Processing batch {file_idx} ({len(documents):,} documents) with optimized strategy...")
+        
+        # Get special tokens from tokenizer
+        special_ids = self.tokenizer.get_special_token_ids()
+        eos_token_id = special_ids["eos_token_id"]
+        bos_token_id = special_ids["bos_token_id"]
+
+        # OPTIMIZATION: Send entire batch to tokenizer at once (no specials)
+        print(f"    Sending {len(documents):,} documents to tokenizer (all at once)...")
+        tokenize_start = time.time()
+        core_encoded = self.tokenizer.encode(documents, add_special_tokens=False)
+        # Manually add BOS/EOS IDs deterministically
+        encoded_batch = [[bos_token_id] + ids + [eos_token_id] for ids in core_encoded]
+        tokenize_elapsed = time.time() - tokenize_start
+        print(f"    Tokenization complete in {tokenize_elapsed:.1f}s ({len(documents)/tokenize_elapsed:.0f} docs/sec)")
+        
+        # Validation: Check special tokens in first few documents
+        num_to_check = min(5, len(encoded_batch))
+        eos_count = sum(1 for ids in encoded_batch[:num_to_check] if eos_token_id in ids)
+        bos_count = sum(1 for ids in encoded_batch[:num_to_check] if bos_token_id in ids)
+        
+        # Log validation results
+        if eos_count < num_to_check:
+            print(f"    ⚠ WARNING: Only {eos_count}/{num_to_check} documents have EOS tokens")
+        if bos_count < num_to_check:
+            print(f"    ⚠ WARNING: Only {bos_count}/{num_to_check} documents have BOS tokens")
+        
+        # PASS 1: Calculate total sequences needed for pre-allocation
+        print(f"    Pass 1: Calculating total sequences for pre-allocation...")
+        token_lengths = [len(ids) for ids in encoded_batch]
+        total_sequences = self.calculate_num_sequences(token_lengths)
+        
+        if total_sequences == 0:
+            print(f"    Warning: No sequences generated from batch {file_idx}")
+            return {
+                "file": f"tokens_{file_idx}.npy",
+                "documents": len(documents),
+                "tokens": sum(token_lengths),
+                "sequences": 0,
+                "processing_time": time.time() - batch_start_time
+            }
+        
+        # OPTIMIZATION: Pre-allocate the entire sequences array
+        print(f"    Pre-allocating array for {total_sequences:,} sequences...")
+        all_sequences = np.zeros((total_sequences, self.window_size), dtype=np.int16)
+        
+        # PASS 2: Fill the pre-allocated array with sliding windows
+        print(f"    Pass 2: Creating sliding windows (size={self.window_size}, stride={self.stride})...")
+        current_idx = 0
+        windows_start = time.time()
+        
+        # Process each document's tokens
+        batch_documents = 0
+        batch_tokens = 0
+        
+        for token_ids in encoded_batch:
+            # Convert to NumPy array once
+            token_array = np.array(token_ids, dtype=np.int16)
+            
+            # Create sliding windows using stride tricks
+            windows = self.create_sliding_windows(token_array)
+            
+            if len(windows) > 0:
+                # Direct assignment to pre-allocated array (no vstack needed!)
+                n_windows = len(windows)
+                all_sequences[current_idx:current_idx + n_windows] = windows
+                current_idx += n_windows
+            
+            batch_documents += 1
+            batch_tokens += len(token_ids)
+        
+        windows_elapsed = time.time() - windows_start
+        print(f"    Window creation complete in {windows_elapsed:.1f}s ({total_sequences/windows_elapsed:.0f} windows/sec)")
+        
+        # Save the pre-allocated array directly
+        output_path = output_dir / f"tokens_{file_idx}.npy"
+        print(f"    Saving to: {output_path}")
+        save_start = time.time()
+        np.save(output_path, all_sequences)
+        save_elapsed = time.time() - save_start
+        print(f"    Save complete in {save_elapsed:.1f}s")
+        
+        # Update global statistics
+        self.total_documents += batch_documents
+        self.total_tokens += batch_tokens
+        self.total_sequences += total_sequences
+        
+        # Calculate batch statistics
+        elapsed = time.time() - batch_start_time
+        stats = {
+            "file": f"tokens_{file_idx}.npy",
+            "documents": batch_documents,
+            "tokens": batch_tokens,
+            "sequences": total_sequences,
+            "processing_time": elapsed,
+            "docs_per_sec": batch_documents / elapsed if elapsed > 0 else 0,
+            "tokens_per_sec": batch_tokens / elapsed if elapsed > 0 else 0,
+            "breakdown": {
+                "tokenization_time": tokenize_elapsed,
+                "window_creation_time": windows_elapsed,
+                "save_time": save_elapsed
+            }
+        }
+        
+        print(f"    Complete: {batch_documents:,} documents -> {total_sequences:,} sequences")
+        print(f"    Performance: {stats['docs_per_sec']:.0f} docs/sec, {stats['tokens_per_sec']:.0f} tokens/sec")
+        print(f"    Total time: {elapsed:.1f}s")
+        
+        return stats
 
 
 def main():
@@ -384,10 +789,14 @@ def main():
                        help="Test mode: process only 10,000 documents")
     parser.add_argument("--window", type=int, default=512,
                        help="Context window size in tokens (default: 512)")
-    parser.add_argument("--batch-size", type=int, default=10000,
-                       help="Number of documents per batch (default: 10000)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                       help="Number of documents per batch (default: auto-calculated for 10B tokens)")
+    parser.add_argument("--target-tokens", type=int, default=10_000_000_000,
+                       help="Target total tokens to process (default: 10B)")
     parser.add_argument("--max-files", type=int, default=38,
                        help="Maximum number of output files (default: 38)")
+    parser.add_argument("--workers", type=int, default=0,
+                       help="Number of parallel shard workers for streaming (default: 0=auto/test/prefetch)")
     
     args = parser.parse_args()
     
@@ -409,7 +818,9 @@ def main():
         output_dir=output_dir,
         test_mode=args.test,
         batch_size=args.batch_size,
-        max_files=args.max_files
+        max_files=args.max_files,
+        target_total_tokens=args.target_tokens,
+        workers=args.workers
     )
 
 

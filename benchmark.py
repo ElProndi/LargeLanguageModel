@@ -526,42 +526,47 @@ class ModelBenchmark:
             
             try:
                 # 1. Perplexity on WikiText
-                print("\n1. Calculating perplexity on WikiText-103...")
+                print("\n1. WikiText-103 Dataset - Language Modeling")
+                print("   Calculating perplexity...")
                 perplexity = self.calculate_perplexity(
                     model, tokenizer, wikitext_samples, 
                     max_length=config['max_length']
                 )
                 model_results['perplexity'] = perplexity
-                print(f"   Perplexity: {perplexity:.2f}")
+                print(f"   ✓ Perplexity: {perplexity:.2f} (lower is better)")
                 
-                # 2. Text completion (BLEU/ROUGE)
-                print("\n2. Evaluating text completion...")
+                # 2. Text completion (BLEU/ROUGE) on LAMBADA
+                print("\n2. LAMBADA Dataset - Text Completion Quality")
+                print("   Generating completions and calculating BLEU/ROUGE scores...")
                 completion_scores = self.evaluate_text_completion(
                     model, tokenizer,
                     completion_prompts, completion_refs,
                     max_new_tokens=config['max_new_tokens']
                 )
                 model_results.update(completion_scores)
-                print(f"   BLEU: {completion_scores['bleu']:.2f}")
-                print(f"   ROUGE-1: {completion_scores['rouge1']:.2f}")
-                print(f"   ROUGE-L: {completion_scores['rougeL']:.2f}")
+                print(f"   ✓ BLEU: {completion_scores['bleu']:.2f}")
+                print(f"   ✓ ROUGE-1: {completion_scores['rouge1']:.2f}")
+                print(f"   ✓ ROUGE-L: {completion_scores['rougeL']:.2f}")
                 
-                # 3. Next token prediction
-                print("\n3. Evaluating next token prediction...")
+                # 3. Next token prediction on LAMBADA
+                print("\n3. LAMBADA Dataset - Next Token Prediction")
+                print("   Evaluating context-dependent word prediction...")
                 pred_scores = self.evaluate_next_token_prediction(
                     model, tokenizer, lambada_samples
                 )
                 model_results.update(pred_scores)
-                print(f"   Top-1 Accuracy: {pred_scores['top1_acc']:.2f}%")
-                print(f"   Top-5 Accuracy: {pred_scores['top5_acc']:.2f}%")
+                print(f"   ✓ Top-1 Accuracy: {pred_scores['top1_acc']:.2f}%")
+                print(f"   ✓ Top-5 Accuracy: {pred_scores['top5_acc']:.2f}%")
+                print(f"   ✓ Top-10 Accuracy: {pred_scores['top10_acc']:.2f}%")
                 
-                # 4. Commonsense reasoning
-                print("\n4. Evaluating commonsense reasoning...")
+                # 4. Commonsense reasoning on HellaSwag-style
+                print("\n4. HellaSwag-Style Dataset - Commonsense Reasoning")
+                print("   Evaluating multiple-choice completions...")
                 commonsense_acc = self.evaluate_commonsense(
                     model, tokenizer, hellaswag_samples
                 )
                 model_results['commonsense_acc'] = commonsense_acc
-                print(f"   Accuracy: {commonsense_acc:.2f}%")
+                print(f"   ✓ Accuracy: {commonsense_acc:.2f}%")
                 
             except Exception as e:
                 print(f"   ERROR: {str(e)}")
@@ -573,69 +578,131 @@ class ModelBenchmark:
 
 
 def format_benchmark_results(results: Dict[str, Dict[str, Any]]) -> str:
-    """Format benchmark results as a readable table."""
+    """Format benchmark results as a readable table organized by dataset."""
     output = []
     output.append("\n" + "="*80)
     output.append("BENCHMARK RESULTS SUMMARY")
     output.append("="*80)
     
-    # Collect all metrics
-    all_metrics = set()
-    for model_results in results.values():
-        all_metrics.update(model_results.keys())
-    all_metrics.discard('error')
-    all_metrics = sorted(all_metrics)
+    # Define metric groups by dataset
+    metric_groups = {
+        'WikiText-103 Dataset': {
+            'metrics': ['perplexity'],
+            'description': 'Language modeling quality (lower is better)'
+        },
+        'LAMBADA Dataset': {
+            'metrics': ['top1_acc', 'top5_acc', 'top10_acc', 'bleu', 'rouge1', 'rouge2', 'rougeL'],
+            'description': 'Context-dependent prediction and text completion quality'
+        },
+        'HellaSwag-Style Dataset': {
+            'metrics': ['commonsense_acc'],
+            'description': 'Commonsense reasoning via multiple choice'
+        }
+    }
     
     # Find best scores for each metric
     best_scores = {}
-    for metric in all_metrics:
-        if metric == 'perplexity':  # Lower is better
-            best_val = float('inf')
-            best_model = None
-            for model, scores in results.items():
-                if metric in scores and scores[metric] < best_val:
-                    best_val = scores[metric]
-                    best_model = model
-        else:  # Higher is better
-            best_val = -float('inf')
-            best_model = None
-            for model, scores in results.items():
-                if metric in scores and scores[metric] > best_val:
-                    best_val = scores[metric]
-                    best_model = model
-        best_scores[metric] = best_model
+    for group_metrics in metric_groups.values():
+        for metric in group_metrics['metrics']:
+            if metric == 'perplexity':  # Lower is better
+                best_val = float('inf')
+                best_model = None
+                for model, scores in results.items():
+                    if metric in scores and scores[metric] < best_val:
+                        best_val = scores[metric]
+                        best_model = model
+            else:  # Higher is better
+                best_val = -float('inf')
+                best_model = None
+                for model, scores in results.items():
+                    if metric in scores and scores[metric] > best_val:
+                        best_val = scores[metric]
+                        best_model = model
+            best_scores[metric] = best_model
     
-    # Create table
-    output.append("\n" + "-"*80)
-    output.append(f"{'Model':<30} | " + " | ".join(f"{m[:12]:>12}" for m in all_metrics))
-    output.append("-"*80)
-    
-    for model_name, scores in results.items():
-        row = f"{model_name[:30]:<30} | "
-        for metric in all_metrics:
-            if 'error' in scores:
-                value_str = "ERROR"
-            elif metric in scores:
-                value = scores[metric]
-                if metric == 'perplexity':
-                    value_str = f"{value:.2f}"
-                elif 'acc' in metric:
-                    value_str = f"{value:.1f}%"
-                else:
-                    value_str = f"{value:.2f}"
-                
-                # Mark best scores with *
-                if best_scores.get(metric) == model_name:
-                    value_str += "*"
+    # Format results by dataset
+    for dataset_name, dataset_info in metric_groups.items():
+        output.append("\n" + "-"*80)
+        output.append(f"📊 {dataset_name}")
+        output.append(f"   {dataset_info['description']}")
+        output.append("-"*80)
+        
+        # Create header for this dataset's metrics
+        metrics = dataset_info['metrics']
+        metric_headers = []
+        for m in metrics:
+            if m == 'perplexity':
+                metric_headers.append("Perplexity")
+            elif m == 'top1_acc':
+                metric_headers.append("Top-1 Acc")
+            elif m == 'top5_acc':
+                metric_headers.append("Top-5 Acc")
+            elif m == 'top10_acc':
+                metric_headers.append("Top-10 Acc")
+            elif m == 'bleu':
+                metric_headers.append("BLEU")
+            elif m == 'rouge1':
+                metric_headers.append("ROUGE-1")
+            elif m == 'rouge2':
+                metric_headers.append("ROUGE-2")
+            elif m == 'rougeL':
+                metric_headers.append("ROUGE-L")
+            elif m == 'commonsense_acc':
+                metric_headers.append("Accuracy")
             else:
-                value_str = "N/A"
-            
-            row += f"{value_str:>12} | "
-        output.append(row)
+                metric_headers.append(m)
+        
+        output.append(f"{'Model':<30} | " + " | ".join(f"{h:>12}" for h in metric_headers))
+        output.append("-"*80)
+        
+        # Add results for each model
+        for model_name, scores in results.items():
+            row = f"{model_name[:30]:<30} | "
+            for metric in metrics:
+                if 'error' in scores:
+                    value_str = "ERROR"
+                elif metric in scores:
+                    value = scores[metric]
+                    if metric == 'perplexity':
+                        value_str = f"{value:.2f}"
+                    elif 'acc' in metric:
+                        value_str = f"{value:.1f}%"
+                    else:
+                        value_str = f"{value:.2f}"
+                    
+                    # Mark best scores with *
+                    if best_scores.get(metric) == model_name:
+                        value_str += "*"
+                else:
+                    value_str = "N/A"
+                
+                row += f"{value_str:>12} | "
+            output.append(row)
     
-    output.append("-"*80)
-    output.append("* indicates best score for that metric")
-    output.append("Lower perplexity is better; higher scores are better for other metrics")
+    output.append("\n" + "="*80)
+    output.append("LEGEND:")
+    output.append("  * indicates best score for that metric")
+    output.append("  Lower scores are better for: Perplexity")
+    output.append("  Higher scores are better for: All other metrics")
+    output.append("="*80)
+    
+    # Add summary of best model per dataset
+    output.append("\n" + "="*80)
+    output.append("BEST MODELS BY DATASET:")
+    output.append("="*80)
+    
+    for dataset_name, dataset_info in metric_groups.items():
+        # Count how many metrics each model wins in this dataset
+        model_wins = {}
+        for metric in dataset_info['metrics']:
+            if metric in best_scores and best_scores[metric]:
+                winner = best_scores[metric]
+                model_wins[winner] = model_wins.get(winner, 0) + 1
+        
+        if model_wins:
+            # Find model with most wins
+            best_model = max(model_wins.items(), key=lambda x: x[1])
+            output.append(f"  {dataset_name}: {best_model[0]} ({best_model[1]}/{len(dataset_info['metrics'])} metrics)")
     
     return "\n".join(output)
 

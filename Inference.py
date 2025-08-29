@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 import torch
 import torch.nn.functional as F
@@ -274,6 +274,152 @@ def select_multiple_checkpoints(checkpoint_dir: Path) -> Optional[List[Path]]:
             return None
 
 
+def select_checkpoints_from_multiple_runs(base_checkpoint_dir: Path) -> Optional[List[Tuple[Path, Path]]]:
+    """Interactive checkpoint selection from multiple training runs.
+    
+    Returns:
+        List of (run_dir, checkpoint_path) tuples or None if cancelled
+    """
+    run_dirs = list_run_directories(base_checkpoint_dir)
+    
+    # Check for flat structure (backward compatibility)
+    if not run_dirs:
+        if any(base_checkpoint_dir.glob("*.pt")):
+            print_warning("Found checkpoints in old flat structure. Using base directory.")
+            checkpoints = select_multiple_checkpoints(base_checkpoint_dir)
+            if checkpoints:
+                return [(base_checkpoint_dir, cp) for cp in checkpoints]
+            return None
+        print_error(f"No training runs found in {base_checkpoint_dir}")
+        return None
+    
+    # Step 1: Select training runs
+    print(f"{Colors.BOLD}Step 1: Select Training Runs{Colors.ENDC}")
+    print("-" * 70)
+    
+    for idx, (display_name, _) in enumerate(run_dirs, 1):
+        if idx == 1:
+            print(f"  {Colors.GREEN}{idx:2d}. {display_name} (most recent){Colors.ENDC}")
+        else:
+            print(f"  {idx:2d}. {display_name}")
+    
+    print("-" * 70)
+    print(f"{Colors.CYAN}Enter run numbers separated by commas (e.g., 1,3,5){Colors.ENDC}")
+    print(f"{Colors.CYAN}Or enter 'all' to select all runs{Colors.ENDC}")
+    print(f"{Colors.WARNING}Enter 0 to cancel{Colors.ENDC}")
+    
+    selected_runs = []
+    while True:
+        try:
+            choice = input(f"\n{Colors.BOLD}Select runs: {Colors.ENDC}").strip()
+            
+            if choice == '0':
+                return None
+            
+            if choice.lower() == 'all':
+                selected_runs = run_dirs
+                print_success(f"Selected all {len(selected_runs)} runs")
+                break
+            
+            # Parse comma-separated numbers
+            try:
+                indices = [int(x.strip()) for x in choice.split(',')]
+                
+                for idx in indices:
+                    if 1 <= idx <= len(run_dirs):
+                        selected_runs.append(run_dirs[idx - 1])
+                    else:
+                        print_warning(f"Invalid index {idx}, skipping...")
+                
+                if selected_runs:
+                    print_success(f"Selected {len(selected_runs)} runs:")
+                    for name, _ in selected_runs:
+                        print(f"  • {name.split()[0]}")
+                    break
+                else:
+                    print_warning("No valid runs selected. Please try again.")
+                    
+            except ValueError:
+                print_warning("Invalid input. Please enter numbers separated by commas, 'all', or 0 to cancel.")
+                
+        except KeyboardInterrupt:
+            print_warning("\nSelection cancelled")
+            return None
+    
+    # Step 2: Select checkpoints from each run
+    all_selected_checkpoints = []
+    
+    for run_idx, (run_name, run_path) in enumerate(selected_runs, 1):
+        print(f"\n{Colors.BOLD}Step 2.{run_idx}: Select Checkpoints from {run_path.name}{Colors.ENDC}")
+        
+        checkpoints = list_checkpoints(run_path)
+        if not checkpoints:
+            print_warning(f"No checkpoints found in {run_path.name}, skipping...")
+            continue
+        
+        print("-" * 70)
+        for idx, (display_name, _) in enumerate(checkpoints, 1):
+            if "best" in display_name:
+                print(f"  {idx:2d}. {display_name} {Colors.GREEN}(best){Colors.ENDC}")
+            elif "latest" in display_name:
+                print(f"  {idx:2d}. {display_name} {Colors.BLUE}(latest){Colors.ENDC}")
+            else:
+                print(f"  {idx:2d}. {display_name}")
+        
+        print("-" * 70)
+        print(f"{Colors.CYAN}Enter checkpoint numbers for this run (e.g., 1,3){Colors.ENDC}")
+        print(f"{Colors.CYAN}Or 'all' for all checkpoints, 'skip' to skip this run{Colors.ENDC}")
+        
+        while True:
+            try:
+                choice = input(f"{Colors.BOLD}Select checkpoints: {Colors.ENDC}").strip()
+                
+                if choice.lower() == 'skip':
+                    print_info(f"Skipping {run_path.name}")
+                    break
+                
+                if choice.lower() == 'all':
+                    for _, checkpoint_path in checkpoints:
+                        all_selected_checkpoints.append((run_path, checkpoint_path))
+                    print_success(f"Selected all {len(checkpoints)} checkpoints from {run_path.name}")
+                    break
+                
+                # Parse comma-separated numbers
+                try:
+                    indices = [int(x.strip()) for x in choice.split(',') if x.strip()]
+                    selected_count = 0
+                    
+                    for idx in indices:
+                        if 1 <= idx <= len(checkpoints):
+                            _, checkpoint_path = checkpoints[idx - 1]
+                            all_selected_checkpoints.append((run_path, checkpoint_path))
+                            selected_count += 1
+                        else:
+                            print_warning(f"Invalid index {idx}, skipping...")
+                    
+                    if selected_count > 0:
+                        print_success(f"Selected {selected_count} checkpoints from {run_path.name}")
+                        break
+                    else:
+                        print_warning("No valid checkpoints selected. Try again or type 'skip'.")
+                        
+                except ValueError:
+                    print_warning("Invalid input. Enter numbers, 'all', or 'skip'.")
+                    
+            except KeyboardInterrupt:
+                print_warning("\nSelection cancelled")
+                return None
+    
+    if all_selected_checkpoints:
+        print(f"\n{Colors.GREEN}{'=' * 70}{Colors.ENDC}")
+        print_success(f"Total selected: {len(all_selected_checkpoints)} checkpoints from {len(selected_runs)} runs")
+        print(f"{Colors.GREEN}{'=' * 70}{Colors.ENDC}")
+        return all_selected_checkpoints
+    else:
+        print_warning("No checkpoints selected from any run.")
+        return None
+
+
 def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tuple[TransformerLM, WikipediaTokenizer]:
     """Load model from checkpoint and tokenizer.
     
@@ -323,6 +469,28 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
     tokenizer_config = config.get('tokenizer', {})
     rope_config = config.get('rope', {})
     
+    # Extract actual intermediate_size from the checkpoint's state_dict
+    state_dict = checkpoint['model_state_dict']
+    intermediate_size = None
+    use_scaled_residuals = False
+    
+    # Check for FFN layer dimensions to determine actual intermediate_size
+    for key in state_dict.keys():
+        if 'ffn.w_gate.weight' in key:
+            # Shape is [intermediate_size, hidden_size]
+            intermediate_size = state_dict[key].shape[0]
+            print_info(f"Detected FFN intermediate size: {intermediate_size}")
+            break
+    
+    # Check if residual scaling parameters exist in checkpoint
+    has_residual_scaling = any('residual_scale' in key for key in state_dict.keys())
+    if has_residual_scaling:
+        use_scaled_residuals = True
+        print_info("Detected residual scaling in checkpoint")
+    else:
+        use_scaled_residuals = False
+        print_info("No residual scaling in checkpoint (older model)")
+    
     # Create model with all architecture parameters from config
     model = TransformerLM(
         vocab_size=model_config['vocab_size'],
@@ -331,6 +499,8 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
         num_heads=model_config['num_heads'],
         # CRITICAL: Pass num_kv_heads to match trained model architecture
         num_kv_heads=model_config.get('num_kv_heads', model_config['num_heads']),
+        # Pass detected or configured intermediate_size
+        intermediate_size=intermediate_size,  # Use detected size from checkpoint
         # Pass modern architecture flags
         use_rms_norm=model_config.get('use_rms_norm', True),
         use_swiglu=model_config.get('use_swiglu', True),
@@ -338,17 +508,18 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
         # RoPE configuration
         rope_theta=rope_config.get('theta', 10000.0),
         rope_scaling=rope_config.get('scaling_factor', 1.0),
+        # Use detected residual scaling setting
+        use_scaled_residuals=use_scaled_residuals,
         # Disable dropout for inference
         dropout=0.0,
         attention_dropout=0.0,
         layer_norm_eps=model_config['layer_norm_eps'],
         initializer_range=model_config['initializer_range'],
         use_cache=model_config['use_cache'],
-        pad_token_id=tokenizer_config.get('pad_token_id', 2)
+        pad_token_id=tokenizer_config.get('pad_token_id', 32000)  # Changed default from 2 to 32000
     )
     
     # Handle compiled model state dict (remove "_orig_mod." prefix if present)
-    state_dict = checkpoint['model_state_dict']
     new_state_dict = {}
     for k, v in state_dict.items():
         if k.startswith('_orig_mod.'):
@@ -394,16 +565,23 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
 
 
 def load_multiple_models(
-    checkpoint_paths: List[Path], 
+    checkpoint_info: Union[List[Path], List[Tuple[Path, Path]]], 
     device: torch.device
-) -> Tuple[Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], float]:
+) -> Tuple[Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], Dict[str, Dict], float]:
     """Load multiple models from checkpoints.
     
+    Args:
+        checkpoint_info: Either a list of checkpoint paths (old format)
+                        or a list of (run_dir, checkpoint_path) tuples (new format)
+        device: Device to load models on
+    
     Returns:
-        Tuple of (models_dict, total_memory_gb)
-        where models_dict maps checkpoint names to (model, tokenizer) tuples
+        Tuple of (models_dict, metadata_dict, total_memory_gb)
+        where models_dict maps descriptive names to (model, tokenizer) tuples
+        and metadata_dict contains information about each model
     """
     models = {}
+    metadata = {}
     total_memory = 0
     
     # Check available memory first
@@ -414,12 +592,29 @@ def load_multiple_models(
         free_memory = available_memory - used_memory
         print_info(f"Available GPU memory: {free_memory / 1e9:.2f} GB")
     
-    print(f"\n{Colors.BOLD}Loading {len(checkpoint_paths)} Models...{Colors.ENDC}")
+    # Handle both old format (list of paths) and new format (list of tuples)
+    checkpoint_list = []
+    if checkpoint_info and isinstance(checkpoint_info[0], tuple):
+        # New format: (run_dir, checkpoint_path) tuples
+        for run_dir, checkpoint_path in checkpoint_info:
+            run_name = run_dir.name if run_dir != checkpoint_path.parent else "base"
+            checkpoint_list.append((run_name, checkpoint_path))
+    else:
+        # Old format: just checkpoint paths
+        for checkpoint_path in checkpoint_info:
+            checkpoint_list.append(("base", checkpoint_path))
+    
+    print(f"\n{Colors.BOLD}Loading {len(checkpoint_list)} Models...{Colors.ENDC}")
     print("-" * 60)
     
-    for idx, checkpoint_path in enumerate(checkpoint_paths, 1):
-        model_name = checkpoint_path.name
-        print(f"\n{Colors.CYAN}Model {idx}/{len(checkpoint_paths)}: {model_name}{Colors.ENDC}")
+    for idx, (run_name, checkpoint_path) in enumerate(checkpoint_list, 1):
+        # Create descriptive model name
+        if run_name != "base":
+            model_name = f"{run_name}/{checkpoint_path.name}"
+        else:
+            model_name = checkpoint_path.name
+        
+        print(f"\n{Colors.CYAN}Model {idx}/{len(checkpoint_list)}: {model_name}{Colors.ENDC}")
         
         try:
             # Load model and tokenizer
@@ -429,8 +624,16 @@ def load_multiple_models(
             model_memory = sum(p.numel() * p.element_size() for p in model.parameters())
             total_memory += model_memory
             
-            # Store in dictionary
+            # Store in dictionary with descriptive name
             models[model_name] = (model, tokenizer)
+            
+            # Store metadata for display
+            metadata[model_name] = {
+                'run': run_name,
+                'checkpoint': checkpoint_path.name,
+                'params': sum(p.numel() for p in model.parameters()),
+                'memory_mb': model_memory / 1e6
+            }
             
             print_success(f"✓ Loaded {model_name} ({model_memory / 1e6:.1f} MB)")
             
@@ -444,14 +647,14 @@ def load_multiple_models(
             print_warning(f"Continuing with other models...")
     
     print("\n" + "=" * 60)
-    print_success(f"Successfully loaded {len(models)} out of {len(checkpoint_paths)} models")
+    print_success(f"Successfully loaded {len(models)} out of {len(checkpoint_list)} models")
     print_info(f"Total model memory: {total_memory / 1e9:.2f} GB")
     
     if not models:
         print_error("No models could be loaded!")
-        return None, 0
+        return None, None, 0
     
-    return models, total_memory / 1e9
+    return models, metadata, total_memory / 1e9
 
 
 
@@ -648,8 +851,14 @@ def generate_text_multi_model(
     return results
 
 
-def display_multi_model_results(results: Dict[str, Dict[str, any]], prompt: str):
-    """Display comparison results from multiple models."""
+def display_multi_model_results(results: Dict[str, Dict[str, any]], prompt: str, metadata: Optional[Dict[str, Dict]] = None):
+    """Display comparison results from multiple models.
+    
+    Args:
+        results: Generation results from each model
+        prompt: The prompt used for generation
+        metadata: Optional dictionary containing metadata for each model
+    """
     print(f"\n{Colors.HEADER}{Colors.BOLD}{'=' * 70}{Colors.ENDC}")
     print(f"{Colors.HEADER}{Colors.BOLD}{'MODEL COMPARISON RESULTS'.center(70)}{Colors.ENDC}")
     print(f"{Colors.HEADER}{Colors.BOLD}{'=' * 70}{Colors.ENDC}")
@@ -660,6 +869,13 @@ def display_multi_model_results(results: Dict[str, Dict[str, any]], prompt: str)
     for idx, (model_name, result) in enumerate(results.items(), 1):
         print(f"\n{Colors.BLUE}{'─' * 70}{Colors.ENDC}")
         print(f"{Colors.BLUE}{Colors.BOLD}Model {idx}: {model_name}{Colors.ENDC}")
+        
+        # Display metadata if available
+        if metadata and model_name in metadata:
+            model_metadata = metadata[model_name]
+            print(f"{Colors.CYAN}  Run: {model_metadata['run']}, Checkpoint: {model_metadata['checkpoint']}{Colors.ENDC}")
+            print(f"{Colors.CYAN}  Parameters: {model_metadata['params']:,}, Memory: {model_metadata['memory_mb']:.1f} MB{Colors.ENDC}")
+        
         print(f"{Colors.BLUE}{'─' * 70}{Colors.ENDC}")
         
         if result.get('error'):
@@ -733,13 +949,13 @@ def main():
         print_error(f"Checkpoint directory not found: {base_checkpoint_dir}")
         sys.exit(1)
     
-    # First select training run
-    run_dir = select_run_directory(base_checkpoint_dir)
-    if run_dir is None:
-        print_warning("No training run selected. Exiting.")
-        sys.exit(0)
-    
     if mode_choice == 1:
+        # Single model mode - still uses single run selection
+        run_dir = select_run_directory(base_checkpoint_dir)
+        if run_dir is None:
+            print_warning("No training run selected. Exiting.")
+            sys.exit(0)
+        
         # Single model mode
         checkpoint_path = select_checkpoint(run_dir)
         if checkpoint_path is None:
@@ -760,20 +976,20 @@ def main():
         run_single_model_inference(model, tokenizer, device)
         
     elif mode_choice == 2:
-        # Multi-model mode
-        checkpoint_paths = select_multiple_checkpoints(run_dir)
-        if checkpoint_paths is None or len(checkpoint_paths) == 0:
+        # Multi-model mode - now supports cross-run selection
+        checkpoint_info = select_checkpoints_from_multiple_runs(base_checkpoint_dir)
+        if checkpoint_info is None or len(checkpoint_info) == 0:
             print_info("No checkpoints selected. Exiting.")
             sys.exit(0)
         
         # Memory warning for multiple models
         estimated_memory_per_model = 0.1  # ~100MB per model
-        estimated_total_memory = len(checkpoint_paths) * estimated_memory_per_model
+        estimated_total_memory = len(checkpoint_info) * estimated_memory_per_model
         
         if device.type == 'cuda':
             available_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
             if estimated_total_memory > available_memory * 0.8:
-                print_warning(f"Selected {len(checkpoint_paths)} models (~{estimated_total_memory:.1f}GB)")
+                print_warning(f"Selected {len(checkpoint_info)} models (~{estimated_total_memory:.1f}GB)")
                 print_warning(f"Available GPU memory: {available_memory:.1f}GB")
                 print_warning("This may exceed available memory!")
                 confirm = input(f"\n{Colors.BOLD}Continue anyway? (y/n): {Colors.ENDC}")
@@ -781,8 +997,8 @@ def main():
                     print_info("Model loading cancelled.")
                     sys.exit(0)
         else:
-            if len(checkpoint_paths) > 5:
-                print_warning(f"Loading {len(checkpoint_paths)} models on CPU may be slow.")
+            if len(checkpoint_info) > 5:
+                print_warning(f"Loading {len(checkpoint_info)} models on CPU may be slow.")
                 confirm = input(f"\n{Colors.BOLD}Continue? (y/n): {Colors.ENDC}")
                 if confirm.lower() != 'y':
                     print_info("Model loading cancelled.")
@@ -791,7 +1007,7 @@ def main():
         # Load multiple models
         print(f"\n{Colors.BOLD}Loading Multiple Models...{Colors.ENDC}")
         try:
-            models_dict, total_memory = load_multiple_models(checkpoint_paths, device)
+            models_dict, metadata, total_memory = load_multiple_models(checkpoint_info, device)
             if models_dict is None:
                 print_error("Failed to load any models. Exiting.")
                 sys.exit(1)
@@ -803,13 +1019,13 @@ def main():
         
         print_success(f"Successfully loaded {len(models_dict)} models!")
         
-        # Run multi-model inference loop
-        run_multi_model_inference(models_dict, device)
+        # Run multi-model inference loop with metadata
+        run_multi_model_inference(models_dict, metadata, device)
     
     elif mode_choice == 3:
-        # Benchmark mode
-        checkpoint_paths = select_multiple_checkpoints(run_dir)
-        if checkpoint_paths is None or len(checkpoint_paths) == 0:
+        # Benchmark mode - also supports cross-run selection
+        checkpoint_info = select_checkpoints_from_multiple_runs(base_checkpoint_dir)
+        if checkpoint_info is None or len(checkpoint_info) == 0:
             print_info("No checkpoints selected. Exiting.")
             sys.exit(0)
         
@@ -820,7 +1036,7 @@ def main():
         if device.type == 'cuda':
             available_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
             if estimated_total_memory > available_memory * 0.8:
-                print_warning(f"Selected {len(checkpoint_paths)} models (~{estimated_total_memory:.1f}GB)")
+                print_warning(f"Selected {len(checkpoint_info)} models (~{estimated_total_memory:.1f}GB)")
                 print_warning(f"Available GPU memory: {available_memory:.1f}GB")
                 print_warning("This may exceed available memory!")
                 confirm = input(f"\n{Colors.BOLD}Continue anyway? (y/n): {Colors.ENDC}")
@@ -828,8 +1044,8 @@ def main():
                     print_info("Model loading cancelled.")
                     sys.exit(0)
         else:
-            if len(checkpoint_paths) > 3:
-                print_warning(f"Loading {len(checkpoint_paths)} models on CPU for benchmarking may be slow.")
+            if len(checkpoint_info) > 3:
+                print_warning(f"Loading {len(checkpoint_info)} models on CPU for benchmarking may be slow.")
                 confirm = input(f"\n{Colors.BOLD}Continue? (y/n): {Colors.ENDC}")
                 if confirm.lower() != 'y':
                     print_info("Model loading cancelled.")
@@ -838,7 +1054,7 @@ def main():
         # Load multiple models for benchmarking
         print(f"\n{Colors.BOLD}Loading Models for Benchmarking...{Colors.ENDC}")
         try:
-            models_dict, total_memory = load_multiple_models(checkpoint_paths, device)
+            models_dict, metadata, total_memory = load_multiple_models(checkpoint_info, device)
             if models_dict is None:
                 print_error("Failed to load any models. Exiting.")
                 sys.exit(1)
@@ -1043,8 +1259,8 @@ def run_benchmark_mode(models_dict: Dict[str, Tuple[TransformerLM, WikipediaToke
             print_info("GPU cache cleared")
 
 
-def run_multi_model_inference(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], device: torch.device):
-    """Run multi-model comparison inference loop."""
+def run_multi_model_inference(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], metadata: Dict[str, Dict], device: torch.device):
+    """Run multi-model comparison inference loop with metadata."""
     # Main generation loop
     print(f"\n{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.CYAN}Starting multi-model comparison session...{Colors.ENDC}")
@@ -1088,8 +1304,8 @@ def run_multi_model_inference(models_dict: Dict[str, Tuple[TransformerLM, Wikipe
                 **generation_params
             )
             
-            # Display comparison results
-            display_multi_model_results(results, prompt)
+            # Display comparison results with model metadata
+            display_multi_model_results(results, prompt, metadata)
             
             # Ask to continue
             print(f"\n{Colors.BOLD}Continue?{Colors.ENDC}")

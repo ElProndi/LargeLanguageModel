@@ -164,22 +164,21 @@ class DatasetTokenizer:
         # The CodeLlama tokenizer handles internal batching and parallelization.
         print(f"  Sending {len(all_articles):,} articles to tokenizer (all at once)...")
         
-        # Get EOS token from the tokenizer to append to each article
-        # This ensures proper document boundaries are learned by the model
-        eos_token = self.tokenizer.tokenizer.eos_token  # "</s>"
+        # Encode articles in batch WITHOUT auto-added special tokens
+        # Then manually add BOS and EOS IDs to guarantee boundaries
+        special_ids = self.tokenizer.get_special_token_ids()
+        bos_token_id = special_ids["bos_token_id"]
+        eos_token_id = special_ids["eos_token_id"]
+
+        encoded_core = self.tokenizer.encode(all_articles, add_special_tokens=False)
+
+        # Manually add BOS/EOS to every article deterministically
+        encodings = [
+            type('Encoding', (), {'ids': ([bos_token_id] + ids + [eos_token_id])})()
+            for ids in encoded_core
+        ]
         
-        # Append EOS token to each article before encoding
-        # BOS will be added automatically by add_special_tokens=True
-        articles_with_eos = [article + eos_token for article in all_articles]
-        
-        # WikipediaTokenizer.encode handles batch encoding internally
-        encoded_batch = self.tokenizer.encode(articles_with_eos, add_special_tokens=True)
-        # Convert to list of objects with 'ids' attribute for compatibility
-        encodings = [type('Encoding', (), {'ids': ids})() for ids in encoded_batch]
-        
-        # Validation: Check that EOS tokens are present
-        eos_token_id = self.tokenizer.tokenizer.eos_token_id
-        bos_token_id = self.tokenizer.tokenizer.bos_token_id
+        # Validation: Check that EOS/BOS tokens are present
         
         # Sample first few articles to verify special tokens
         num_to_check = min(5, len(encodings))
