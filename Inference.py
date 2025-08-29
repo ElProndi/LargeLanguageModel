@@ -7,11 +7,9 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-import torch.nn.functional as F
-import numpy as np
 
 # Import project modules
 from model import TransformerLM
@@ -501,9 +499,6 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
         num_kv_heads=model_config.get('num_kv_heads', model_config['num_heads']),
         # Pass detected or configured intermediate_size
         intermediate_size=intermediate_size,  # Use detected size from checkpoint
-        # Pass modern architecture flags
-        use_rms_norm=model_config.get('use_rms_norm', True),
-        use_swiglu=model_config.get('use_swiglu', True),
         max_position_embeddings=model_config['max_position_embeddings'],
         # RoPE configuration
         rope_theta=rope_config.get('theta', 10000.0),
@@ -516,7 +511,7 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
         layer_norm_eps=model_config['layer_norm_eps'],
         initializer_range=model_config['initializer_range'],
         use_cache=model_config['use_cache'],
-        pad_token_id=tokenizer_config.get('pad_token_id', 32000)  # Changed default from 2 to 32000
+        pad_token_id=tokenizer_config.get('pad_token_id', 2)  # Same as EOS token (CodeLlama convention)
     )
     
     # Handle compiled model state dict (remove "_orig_mod." prefix if present)

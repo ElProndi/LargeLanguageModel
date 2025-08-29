@@ -5,7 +5,7 @@ import sys
 import time
 import argparse
 from pathlib import Path
-from typing import Iterator, List, Tuple, Dict, Any
+from typing import List, Dict, Any
 import numpy as np
 import orjson
 from numpy.lib.stride_tricks import as_strided

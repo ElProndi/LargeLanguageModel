@@ -9,7 +9,7 @@ using native PyTorch modules for efficiency and simplicity.
 import json
 import math
 import os
-from typing import Optional, Union, Tuple
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -194,7 +194,7 @@ class FastMultiHeadAttention(nn.Module):
 class FastTransformerDecoderLayer(nn.Module):
     """
     Optimized Transformer Decoder Layer using FastMultiHeadAttention with RoPE.
-    Uses SwiGLU activation and pre-norm architecture for better training stability.
+    Uses SwiGLU activation and RMSNorm with pre-norm architecture for better training stability.
     Includes residual scaling and gradient checkpointing support.
     """
     
@@ -208,8 +208,6 @@ class FastTransformerDecoderLayer(nn.Module):
         attention_dropout: float = 0.1,
         layer_norm_eps: float = 1e-5,
         bias: bool = True,
-        use_rms_norm: bool = True,
-        use_swiglu: bool = True,
         max_position_embeddings: int = 512,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
@@ -235,24 +233,17 @@ class FastTransformerDecoderLayer(nn.Module):
             rope_scaling=rope_scaling
         )
         
-        # Feed-forward network - use SwiGLU or standard FFN
-        self.use_swiglu = use_swiglu
-        if use_swiglu:
-            self.ffn = SwiGLU(
-                hidden_size=hidden_size,
-                intermediate_size=intermediate_size,
-                bias=bias,
-                dropout=dropout
-            )
-        else:
-            # Fallback to standard FFN
-            self.fc1 = nn.Linear(hidden_size, intermediate_size, bias=bias)
-            self.fc2 = nn.Linear(intermediate_size, hidden_size, bias=bias)
+        # Feed-forward network - always use SwiGLU for better gradient flow
+        self.ffn = SwiGLU(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            bias=bias,
+            dropout=dropout
+        )
         
-        # Use RMSNorm or LayerNorm based on configuration
-        norm_class = nn.RMSNorm if use_rms_norm else nn.LayerNorm
-        self.norm1 = norm_class(hidden_size, eps=layer_norm_eps)
-        self.norm2 = norm_class(hidden_size, eps=layer_norm_eps)
+        # Always use RMSNorm for better efficiency
+        self.norm1 = nn.RMSNorm(hidden_size, eps=layer_norm_eps)
+        self.norm2 = nn.RMSNorm(hidden_size, eps=layer_norm_eps)
         
         # Dropout
         self.dropout = nn.Dropout(dropout)
@@ -295,15 +286,8 @@ class FastTransformerDecoderLayer(nn.Module):
         # Pre-norm
         hidden_states = self.norm2(hidden_states)
         
-        if self.use_swiglu:
-            # Use SwiGLU activation
-            hidden_states = self.ffn(hidden_states)
-        else:
-            # Standard FFN with GELU activation
-            hidden_states = self.fc1(hidden_states)
-            hidden_states = F.gelu(hidden_states)
-            hidden_states = self.fc2(hidden_states)
-            hidden_states = self.dropout(hidden_states)
+        # Always use SwiGLU activation
+        hidden_states = self.ffn(hidden_states)
         
         return hidden_states
     
@@ -370,7 +354,7 @@ class FastTransformerDecoderLayer(nn.Module):
 
 class FastTransformerDecoder(nn.Module):
     """
-    Stack of optimized Transformer Decoder layers with RoPE and SwiGLU.
+    Stack of optimized Transformer Decoder layers with RoPE, SwiGLU, and RMSNorm.
     Eliminates unnecessary operations from nn.TransformerDecoder.
     """
     
@@ -385,8 +369,6 @@ class FastTransformerDecoder(nn.Module):
         attention_dropout: float = 0.1,
         layer_norm_eps: float = 1e-5,
         bias: bool = True,
-        use_rms_norm: bool = True,
-        use_swiglu: bool = True,
         max_position_embeddings: int = 512,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
@@ -409,8 +391,6 @@ class FastTransformerDecoder(nn.Module):
                 attention_dropout=attention_dropout,
                 layer_norm_eps=layer_norm_eps,
                 bias=bias,
-                use_rms_norm=use_rms_norm,
-                use_swiglu=use_swiglu,
                 max_position_embeddings=max_position_embeddings,
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling,
@@ -422,9 +402,8 @@ class FastTransformerDecoder(nn.Module):
             for i in range(num_layers)
         ])
         
-        # Final layer norm - use RMSNorm or LayerNorm based on config
-        norm_class = nn.RMSNorm if use_rms_norm else nn.LayerNorm
-        self.norm = norm_class(hidden_size, eps=layer_norm_eps)
+        # Final layer norm - always use RMSNorm for efficiency
+        self.norm = nn.RMSNorm(hidden_size, eps=layer_norm_eps)
     
     def forward(
         self,
@@ -446,7 +425,7 @@ class FastTransformerDecoder(nn.Module):
         return hidden_states
 
 class TransformerLM(nn.Module):
-    """Transformer Language Model with RoPE and SwiGLU."""
+    """Transformer Language Model with RoPE, SwiGLU, and RMSNorm."""
     
     def __init__(
         self,
@@ -456,8 +435,6 @@ class TransformerLM(nn.Module):
         num_heads: int = 6,
         num_kv_heads: Optional[int] = None,
         intermediate_size: Optional[int] = None,  # Allow explicit intermediate size
-        use_rms_norm: bool = True,
-        use_swiglu: bool = True,
         max_position_embeddings: int = 512,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
@@ -466,7 +443,7 @@ class TransformerLM(nn.Module):
         layer_norm_eps: float = 1e-5,
         initializer_range: float = 0.02,
         use_cache: bool = True,
-        pad_token_id: int = 32000,  # Changed from 2 (EOS) to 32000 (dedicated padding)
+        pad_token_id: int = 2,  # Same as EOS token (CodeLlama convention)
         eos_token_id: int = 2,
         use_scaled_residuals: bool = True,
         use_gradient_checkpointing: bool = False
@@ -487,8 +464,6 @@ class TransformerLM(nn.Module):
             'num_layers': num_layers,
             'num_heads': num_heads,
             'num_kv_heads': num_kv_heads,
-            'use_rms_norm': use_rms_norm,
-            'use_swiglu': use_swiglu,
             'intermediate_size': intermediate_size,
             'max_position_embeddings': max_position_embeddings,
             'rope_theta': rope_theta,
@@ -521,8 +496,6 @@ class TransformerLM(nn.Module):
             attention_dropout=attention_dropout,
             layer_norm_eps=layer_norm_eps,
             bias=True,
-            use_rms_norm=use_rms_norm,
-            use_swiglu=use_swiglu,
             max_position_embeddings=max_position_embeddings,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
@@ -793,8 +766,8 @@ class TransformerLM(nn.Module):
                 torch.tensor(-100, device=shift_labels.device)
             )
             
-            # Also mask out actual padding tokens (ID 32000 or from config)
-            pad_token_id = self.config.get('pad_token_id', 32000)
+            # Also mask out actual padding tokens (same as EOS in CodeLlama)
+            pad_token_id = self.config.get('pad_token_id', 2)
             masked_labels = torch.where(
                 shift_labels == pad_token_id,
                 torch.tensor(-100, device=shift_labels.device),
@@ -923,7 +896,6 @@ class TransformerLM(nn.Module):
         num_heads = self.config['num_heads']
         num_kv_heads = self.config['num_kv_heads']
         head_dim = hidden_size // num_heads
-        use_swiglu = self.config.get('use_swiglu', True)
         
         # Attention module parameters with GQA
         q_proj_params = hidden_size * (num_heads * head_dim)  # Q projection
@@ -932,18 +904,12 @@ class TransformerLM(nn.Module):
         o_proj_params = hidden_size * hidden_size  # Output projection
         attention_params = q_proj_params + k_proj_params + v_proj_params + o_proj_params
         
-        # Feed-forward network parameters (SwiGLU has 3 matrices instead of 2)
-        if use_swiglu:
-            # SwiGLU uses gate, up, and down projections
-            gate_params = hidden_size * intermediate_size
-            up_params = hidden_size * intermediate_size
-            down_params = intermediate_size * hidden_size
-            ffn_params = gate_params + up_params + down_params
-        else:
-            # Standard FFN
-            fc1_params = hidden_size * intermediate_size
-            fc2_params = intermediate_size * hidden_size
-            ffn_params = fc1_params + fc2_params
+        # Feed-forward network parameters - SwiGLU always uses 3 matrices
+        # SwiGLU uses gate, up, and down projections
+        gate_params = hidden_size * intermediate_size
+        up_params = hidden_size * intermediate_size
+        down_params = intermediate_size * hidden_size
+        ffn_params = gate_params + up_params + down_params
         
         # LayerNorm parameters (2 per block: norm1 and norm2)
         layernorm_params_per = hidden_size * 2  # weight + bias
@@ -1026,16 +992,13 @@ def create_model(config_path: str = "config.json", model_size: str = None) -> Tr
     tokenizer_config = config.get('tokenizer', {})
     rope_config = config.get('rope', {})
     
-    # Create model with configuration, including GQA, RoPE, SwiGLU, and Flash Attention
-    # Use backward-compatible defaults for old configs
+    # Create model with configuration, including GQA, RoPE, SwiGLU, RMSNorm, and Flash Attention
     model = TransformerLM(
         vocab_size=model_config['vocab_size'],
         hidden_size=model_config['hidden_size'],
         num_layers=model_config['num_layers'],
         num_heads=model_config['num_heads'],
         num_kv_heads=model_config.get('num_kv_heads', model_config['num_heads']),
-        use_rms_norm=model_config.get('use_rms_norm', True),
-        use_swiglu=model_config.get('use_swiglu', True),  # Default to SwiGLU
         max_position_embeddings=model_config['max_position_embeddings'],
         rope_theta=rope_config.get('theta', 10000.0),
         rope_scaling=rope_config.get('scaling_factor', 1.0),
@@ -1044,7 +1007,7 @@ def create_model(config_path: str = "config.json", model_size: str = None) -> Tr
         layer_norm_eps=model_config['layer_norm_eps'],
         initializer_range=model_config['initializer_range'],
         use_cache=model_config['use_cache'],
-        pad_token_id=tokenizer_config.get('pad_token_id', 32000),
+        pad_token_id=tokenizer_config.get('pad_token_id', 2),
         eos_token_id=tokenizer_config.get('eos_token_id', 2)
     )
     
@@ -1080,8 +1043,8 @@ if __name__ == "__main__":
     print(f"   Head Size: {head_size} dimensions")
     print(f"   Query Heads: {config['num_heads']}")
     print(f"   KV Heads: {config['num_kv_heads']} (GQA ratio {gqa_ratio}:1)")
-    print(f"   Using RMSNorm: {config['use_rms_norm']}")
-    print(f"   Using SwiGLU: {config.get('use_swiglu', True)}")
+    print(f"   Using RMSNorm: Yes (hardcoded)")
+    print(f"   Using SwiGLU: Yes (hardcoded)")
     print(f"   Using RoPE: Yes (θ={config.get('rope_theta', 10000.0)})")
     print(f"   Flash Attention: Enabled (auto-detect)")
     
@@ -1092,10 +1055,8 @@ if __name__ == "__main__":
     
     print("\n🔧 Single Transformer Block")
     print(f"   ├── Attention (QKV + O_proj): {params['attention_per_block']:>11,} params")
-    ffn_type = "SwiGLU (3 matrices)" if config.get('use_swiglu', True) else "Standard FFN"
-    print(f"   ├── {ffn_type:24} {params['ffn_per_block']:>11,} params")
-    norm_type = "RMSNorms" if config.get('use_rms_norm', True) else "LayerNorms"
-    print(f"   └── {norm_type} (2x):            {params['layernorm_per_block']:>11,} params")
+    print(f"   ├── SwiGLU (3 matrices)       {params['ffn_per_block']:>11,} params")
+    print(f"   └── RMSNorms (2x):            {params['layernorm_per_block']:>11,} params")
     print(f"   Total per block:              {params['single_block']:>11,} params")
     
     print(f"\n🏗️  All Transformer Layers ({params['num_layers']} blocks)")
@@ -1113,6 +1074,5 @@ if __name__ == "__main__":
     print(f"   Embeddings:      {params['embedding'] / params['total'] * 100:>5.1f}%")
     print(f"   Transformer:     {params['transformer'] / params['total'] * 100:>5.1f}%")
     print(f"     - Attention:   {(params['attention_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
-    ffn_label = "SwiGLU" if config.get('use_swiglu', True) else "FFN"
-    print(f"     - {ffn_label:10} {(params['ffn_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
+    print(f"     - SwiGLU:      {(params['ffn_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
     print("\n" + "="*60)

@@ -12,7 +12,7 @@ import sys
 import time
 import gc
 from pathlib import Path
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader

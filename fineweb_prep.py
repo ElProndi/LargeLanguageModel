@@ -11,10 +11,8 @@ import orjson
 from numpy.lib.stride_tricks import as_strided
 from tokenizer import WikipediaTokenizer
 from tqdm import tqdm
-from collections import deque
 import threading
 from queue import Queue
-from threading import Lock
 
 # Try to import datasets library
 try:
@@ -171,148 +169,6 @@ class FineWebTokenizer:
         stop_event.set()
         thread.join(timeout=1)
     
-    def stream_fineweb_dataset_parallel(self,
-                                        max_documents: Optional[int] = None,
-                                        language_score_threshold: float = 0.65,
-                                        min_tokens: int = 100,
-                                        progress_update_freq: int = 2000,
-                                        num_workers: int = 4,
-                                        queue_size: int = 20000) -> Iterator[str]:
-        """Stream FineWeb dataset using parallel shard workers.
-
-        Spawns multiple worker threads that each iterate a disjoint shard of the
-        streaming dataset to increase throughput. The main thread consumes from
-        a queue and yields filtered documents while updating progress in batches.
-
-        Args:
-            max_documents: Maximum accepted documents to yield (None for unlimited)
-            language_score_threshold: Minimum language score to accept
-            min_tokens: Minimum estimated tokens (via char length proxy)
-            progress_update_freq: Progress bar update interval (accepted docs)
-            num_workers: Number of parallel shard workers
-            queue_size: Max size of the shared queue
-
-        Yields:
-            Document text strings that pass filters
-        """
-        print("\nStreaming FineWeb-10BT dataset in parallel shards...")
-        print(f"Workers: {num_workers}, queue size: {queue_size}")
-        print(f"Filters: language_score > {language_score_threshold}, min_tokens > {min_tokens}")
-
-        # Shared structures
-        buffer: Queue = Queue(maxsize=queue_size)
-        stop_event = threading.Event()
-        filtered_lock = Lock()
-        seen_lock = Lock()
-        docs_seen = 0
-
-        # Precompute fast filter threshold in characters
-        min_len_chars = int(min_tokens * 4.5)
-
-        def worker(worker_id: int):
-            nonlocal docs_seen
-            try:
-                ds = load_dataset(
-                    "HuggingFaceFW/fineweb",
-                    name="sample-10BT",
-                    split="train",
-                    streaming=True
-                )
-                # Use contiguous shards so each worker gets a disjoint slice
-                ds = ds.shard(num_shards=num_workers, index=worker_id, contiguous=True)
-
-                local_seen = 0
-                for example in ds:
-                    if stop_event.is_set():
-                        break
-
-                    local_seen += 1
-
-                    # Fast filter: language score
-                    if example.get("language_score", 0) <= language_score_threshold:
-                        with filtered_lock:
-                            self.filtered_documents += 1
-                        continue
-
-                    text = example.get("text", "")
-                    if not text:
-                        with filtered_lock:
-                            self.filtered_documents += 1
-                        continue
-
-                    # Fast proxy for token length
-                    if len(text) < min_len_chars:
-                        with filtered_lock:
-                            self.filtered_documents += 1
-                        continue
-
-                    # Push accepted document (light trim to drop line endings)
-                    try:
-                        buffer.put(text.strip(), timeout=0.5)
-                    except Exception:
-                        # If queue is full and stopping, exit quickly
-                        if stop_event.is_set():
-                            break
-                        buffer.put(text.strip())  # blocking put
-
-                with seen_lock:
-                    docs_seen += local_seen
-            except Exception as e:
-                # Forward error to consumer
-                buffer.put(e)
-            finally:
-                # Signal this worker finished
-                buffer.put(None)
-
-        # Start workers
-        threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(num_workers)]
-        for t in threads:
-            t.start()
-
-        # Consumer loop
-        completed_workers = 0
-        yielded = 0
-        update_counter = 0
-        pbar = tqdm(total=max_documents, desc="Documents processed", unit="docs",
-                    mininterval=0.5, smoothing=0.3)
-        try:
-            while True:
-                item = buffer.get()
-                if item is None:
-                    completed_workers += 1
-                    if completed_workers >= num_workers:
-                        break
-                    continue
-                if isinstance(item, Exception):
-                    # Re-raise worker exception
-                    raise item
-
-                yield item
-                yielded += 1
-                update_counter += 1
-
-                if update_counter >= progress_update_freq:
-                    pbar.update(update_counter)
-                    update_counter = 0
-
-                if max_documents and yielded >= max_documents:
-                    # Stop early: signal workers and drain remaining sentinels
-                    stop_event.set()
-                    break
-        finally:
-            if update_counter > 0:
-                pbar.update(update_counter)
-            pbar.close()
-            # Ensure workers stop and finish
-            stop_event.set()
-            for t in threads:
-                t.join(timeout=1)
-        
-        print("\nStreaming complete:")
-        print(f"  Documents seen (approx): {docs_seen:,}")
-        print(f"  Documents filtered: {self.filtered_documents:,}")
-        print(f"  Documents yielded: {yielded:,}")
-    
     def stream_fineweb_dataset(self, 
                               max_documents: Optional[int] = None,
                               language_score_threshold: float = 0.65,
@@ -399,8 +255,7 @@ class FineWebTokenizer:
                        test_mode: bool = False,
                        batch_size: Optional[int] = None,  # Auto-calculated if None
                        max_files: int = 38,  # Match Wikipedia's 38 files
-                       target_total_tokens: int = 10_000_000_000,  # 10B tokens target
-                       workers: int = 0):
+                       target_total_tokens: int = 10_000_000_000):  # 10B tokens target
         """Process FineWeb dataset and create tokenized sequences.
         
         Args:
@@ -452,17 +307,7 @@ class FineWebTokenizer:
         # Stream documents from FineWeb with optimized settings
         # Use prefetching for better performance in full mode
         use_prefetch = not test_mode
-        if not test_mode and (workers and workers > 1):
-            print(f"Using parallel streaming with {workers} workers...")
-            document_stream = self.stream_fineweb_dataset_parallel(
-                max_documents=max_documents,
-                language_score_threshold=0.65,
-                min_tokens=100,
-                progress_update_freq=2000,
-                num_workers=workers,
-                queue_size=workers * 8000
-            )
-        elif use_prefetch:
+        if use_prefetch:
             print("Using prefetched streaming for optimal performance...")
             document_stream = self.stream_fineweb_dataset_with_prefetch(
                 max_documents=max_documents,
@@ -795,8 +640,6 @@ def main():
                        help="Target total tokens to process (default: 10B)")
     parser.add_argument("--max-files", type=int, default=38,
                        help="Maximum number of output files (default: 38)")
-    parser.add_argument("--workers", type=int, default=0,
-                       help="Number of parallel shard workers for streaming (default: 0=auto/test/prefetch)")
     
     args = parser.parse_args()
     
@@ -819,8 +662,7 @@ def main():
         test_mode=args.test,
         batch_size=args.batch_size,
         max_files=args.max_files,
-        target_total_tokens=args.target_tokens,
-        workers=args.workers
+        target_total_tokens=args.target_tokens
     )
 
 

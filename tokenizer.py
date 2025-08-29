@@ -4,7 +4,7 @@
 import sys
 import argparse
 from pathlib import Path
-from typing import List, Union, Optional
+from typing import List, Union
 import orjson
 
 # Try to import transformers

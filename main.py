@@ -7,7 +7,6 @@ Supports both interactive menu mode and direct CLI execution.
 import argparse
 import subprocess
 import sys
-import os
 from pathlib import Path
 
 # Module mappings
@@ -30,7 +29,7 @@ MODULES = {
     "fineweb": {
         "script": "fineweb_prep.py",
         "description": "Prepare tokenized FineWeb datasets for training",
-        "args_help": "Options: --test (process 10k docs), --window SIZE (default: 512), --batch-size SIZE (default: 10000)"
+        "args_help": "Options: --test, --window SIZE, --batch-size SIZE, --max-files N, --workers N"
     },
     "train": {
         "script": "train.py",
@@ -263,6 +262,8 @@ Examples:
                                 help='Number of documents per batch (default: 10000)')
     fineweb_parser.add_argument('--max-files', type=int, default=38,
                                 help='Maximum number of output files (default: 38)')
+    fineweb_parser.add_argument('--workers', type=int, default=0,
+                                help='Parallel shard workers for streaming (0 uses prefetch)')
     
     # Train module parser
     train_parser = subparsers.add_parser(
@@ -328,6 +329,17 @@ Examples:
             module_args.extend(['--resume', args.resume])
         if args.name:
             module_args.extend(['--name', args.name])
+    elif args.module == 'fineweb':
+        if args.test:
+            module_args.append('--test')
+        if args.window != 512:
+            module_args.extend(['--window', str(args.window)])
+        if args.batch_size != 10000:
+            module_args.extend(['--batch-size', str(args.batch_size)])
+        if args.max_files != 38:
+            module_args.extend(['--max-files', str(args.max_files)])
+        if args.workers and args.workers > 0:
+            module_args.extend(['--workers', str(args.workers)])
             
     # elif args.module == 'inference':
     #     No arguments needed - runs interactively

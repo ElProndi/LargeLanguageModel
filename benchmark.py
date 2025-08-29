@@ -10,7 +10,6 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import torch
-import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 
@@ -20,7 +19,6 @@ from rouge_score import rouge_scorer
 
 # For downloading datasets
 import urllib.request
-import gzip
 import random
 
 

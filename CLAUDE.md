@@ -456,6 +456,25 @@ python3 tokenizer.py --load tokenizers/codellama_tokenizer
 # Output: tokenizers/codellama_tokenizer/
 ```
 
+
+### FineWeb Prep (Parallel Streaming)
+```bash
+# Test mode (single-threaded by default)
+python3 fineweb_prep.py --test
+
+# Full mode with parallel streaming (e.g., 4 workers)
+python3 fineweb_prep.py --workers 4
+
+# Via router with args forwarding
+python3 main.py fineweb -- --workers 4
+
+# Notes:
+# - The --workers flag enables parallel streaming by sharding the dataset
+#   across worker threads, increasing docs/sec for the phase that shows:
+#   "Documents processed: x docs [.., y docs/s]".
+# - For low I/O environments or testing, omit --workers to use prefetch mode.
+```
+
 ### Preparing Wikipedia Dataset
 ```bash
 # Test mode: tokenize first 10,000 articles with CodeLlama
