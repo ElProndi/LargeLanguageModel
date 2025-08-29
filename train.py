@@ -993,8 +993,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train transformer language model")
     parser.add_argument('--config', type=str, default='config.json',
                        help='Path to configuration file')
-    parser.add_argument('--model-size', type=str, choices=['small', 'medium'], default=None,
-                       help='Model size to use (small or medium). Defaults to config setting.')
+    parser.add_argument('--model-size', type=str, choices=['small', 'medium', 'large'], default=None,
+                       help='Model size to use (small, medium, or large). Defaults to config setting.')
     parser.add_argument('--test', action='store_true',
                        help='Run in test mode with smaller dataset')
     parser.add_argument('--resume', type=str, default=None,

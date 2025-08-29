@@ -911,8 +911,9 @@ class TransformerLM(nn.Module):
         down_params = intermediate_size * hidden_size
         ffn_params = gate_params + up_params + down_params
         
-        # LayerNorm parameters (2 per block: norm1 and norm2)
-        layernorm_params_per = hidden_size * 2  # weight + bias
+        # LayerNorm/RMSNorm parameters (2 per block: norm1 and norm2)
+        # RMSNorm only has weight, no bias
+        layernorm_params_per = hidden_size  # weight only (RMSNorm)
         layernorm_params = layernorm_params_per * 2  # norm1 + norm2
         
         # Total for single block
@@ -921,7 +922,7 @@ class TransformerLM(nn.Module):
         # All transformer layers
         num_layers = self.config['num_layers']
         all_blocks_params = single_block_params * num_layers
-        final_norm_params = hidden_size * 2  # Final LayerNorm
+        final_norm_params = hidden_size  # Final RMSNorm (weight only)
         transformer_params = all_blocks_params + final_norm_params
         
         # Total unique parameters (excluding tied weights)
@@ -999,6 +1000,7 @@ def create_model(config_path: str = "config.json", model_size: str = None) -> Tr
         num_layers=model_config['num_layers'],
         num_heads=model_config['num_heads'],
         num_kv_heads=model_config.get('num_kv_heads', model_config['num_heads']),
+        intermediate_size=model_config.get('intermediate_size'),  # Pass from config if specified
         max_position_embeddings=model_config['max_position_embeddings'],
         rope_theta=rope_config.get('theta', 10000.0),
         rope_scaling=rope_config.get('scaling_factor', 1.0),
@@ -1021,58 +1023,136 @@ def create_model(config_path: str = "config.json", model_size: str = None) -> Tr
 
 
 if __name__ == "__main__":
-    import sys
+    import gc
     
-    # Test model creation - accept model size from command line
-    model_size = sys.argv[1] if len(sys.argv) > 1 else None
-    if model_size:
-        print(f"Testing with model size: {model_size}")
-    model = create_model(model_size=model_size)
+    # Test model creation for all three configurations
+    print("\n" + "="*70)
+    print(" MODEL PARAMETER COMPARISON: SMALL vs MEDIUM vs LARGE")
+    print("="*70)
     
-    # Display detailed parameter breakdown
-    params = model.get_num_params()
-    print("\n" + "="*60)
-    print("Model Parameter Breakdown")
-    print("="*60)
+    # Store models and their parameters for comparison
+    model_configs = ["small", "medium", "large"]
+    model_params = {}
+    model_configs_saved = {}  # Store configurations separately
     
-    # Calculate attention head size and GQA ratio
-    config = model.config
-    head_size = config['hidden_size'] // config['num_heads']
-    gqa_ratio = config['num_heads'] // config['num_kv_heads']
-    print(f"\n🎯 Architecture Configuration:")
-    print(f"   Head Size: {head_size} dimensions")
-    print(f"   Query Heads: {config['num_heads']}")
-    print(f"   KV Heads: {config['num_kv_heads']} (GQA ratio {gqa_ratio}:1)")
-    print(f"   Using RMSNorm: Yes (hardcoded)")
-    print(f"   Using SwiGLU: Yes (hardcoded)")
-    print(f"   Using RoPE: Yes (θ={config.get('rope_theta', 10000.0)})")
-    print(f"   Flash Attention: Enabled (auto-detect)")
+    for model_size in model_configs:
+        print(f"\n{'='*70}")
+        print(f" {model_size.upper()} MODEL CONFIGURATION")
+        print('='*70)
+        
+        # Create model
+        model = create_model(model_size=model_size)
+        
+        # Get and store parameter breakdown
+        params = model.get_num_params()
+        model_params[model_size] = params
+        
+        # Save configuration before deleting model
+        config = model.config.copy()
+        model_configs_saved[model_size] = config
+        
+        # Calculate attention head size and GQA ratio
+        head_size = config['hidden_size'] // config['num_heads']
+        gqa_ratio = config['num_heads'] // config['num_kv_heads']
+        
+        print(f"\n🎯 Architecture Configuration ({model_size}):")
+        print(f"   Hidden Size: {config['hidden_size']} dimensions")
+        print(f"   Head Size: {head_size} dimensions")
+        print(f"   Query Heads: {config['num_heads']}")
+        print(f"   KV Heads: {config['num_kv_heads']} (GQA ratio {gqa_ratio}:1)")
+        print(f"   Num Layers: {config['num_layers']}")
+        print(f"   Intermediate Size: {config['intermediate_size']}")
+        print(f"   Vocab Size: {config['vocab_size']}")
+        print(f"   Max Position: {config['max_position_embeddings']}")
+        print(f"   RoPE Theta: {config.get('rope_theta', 10000.0)}")
+        
+        print("\n📦 Embeddings")
+        print(f"   └── Token Embeddings:       {params['embedding']:>12,} params")
+        print(f"   Total Embeddings:           {params['embedding']:>12,} params")
+        print(f"   (RoPE is parameter-free)")
+        
+        print("\n🔧 Single Transformer Block")
+        print(f"   ├── Attention Module:         {params['attention_per_block']:>11,} params")
+        print(f"   ├── Feed-Forward Network:     {params['ffn_per_block']:>11,} params")
+        print(f"   └── Layer Normalizations:     {params['layernorm_per_block']:>11,} params")
+        print(f"   Total per block:              {params['single_block']:>11,} params")
+        
+        print(f"\n🏗️  All Transformer Layers ({params['num_layers']} blocks)")
+        print(f"   ├── {params['num_layers']} × Transformer Blocks: {params['all_blocks']:>11,} params")
+        print(f"   └── Final LayerNorm:          {params['final_norm']:>11,} params")
+        print(f"   Total Transformer:            {params['transformer']:>11,} params")
+        
+        print("\n" + "-"*60)
+        print(f"🎯 Total Model Parameters:      {params['total']:>11,} params")
+        print(f"   Trainable Parameters:        {params['trainable']:>11,} params")
+        print(f"   Memory (FP32):               {params['total'] * 4 / (1024**3):>11.2f} GB")
+        print(f"   Memory (BF16):               {params['total'] * 2 / (1024**3):>11.2f} GB")
+        print("-"*60)
+        
+        # Calculate percentages
+        print("\n📊 Parameter Distribution")
+        print(f"   Embeddings:      {params['embedding'] / params['total'] * 100:>5.1f}%")
+        print(f"   Transformer:     {params['transformer'] / params['total'] * 100:>5.1f}%")
+        print(f"     - Attention:   {(params['attention_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
+        print(f"     - FFN:         {(params['ffn_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
+        print(f"     - LayerNorms:  {(params['layernorm_per_block'] * params['num_layers'] + params['final_norm']) / params['total'] * 100:>5.1f}% of total")
+        
+        # Delete model to free memory before loading next one
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        print(f"\n💾 Memory cleared after {model_size} model")
     
-    print("\n📦 Embeddings")
-    print(f"   └── Token Embeddings:       {params['embedding']:>12,} params")
-    print(f"   Total Embeddings:           {params['embedding']:>12,} params")
-    print(f"   (RoPE is parameter-free)")
+    # Final comparison between all three models
+    print("\n" + "="*70)
+    print(" FINAL COMPARISON: ALL THREE MODELS")
+    print("="*70)
     
-    print("\n🔧 Single Transformer Block")
-    print(f"   ├── Attention (QKV + O_proj): {params['attention_per_block']:>11,} params")
-    print(f"   ├── SwiGLU (3 matrices)       {params['ffn_per_block']:>11,} params")
-    print(f"   └── RMSNorms (2x):            {params['layernorm_per_block']:>11,} params")
-    print(f"   Total per block:              {params['single_block']:>11,} params")
+    small_total = model_params['small']['total']
+    medium_total = model_params['medium']['total']
+    large_total = model_params['large']['total']
     
-    print(f"\n🏗️  All Transformer Layers ({params['num_layers']} blocks)")
-    print(f"   ├── {params['num_layers']} × Transformer Blocks: {params['all_blocks']:>11,} params")
-    print(f"   └── Final LayerNorm:          {params['final_norm']:>11,} params")
-    print(f"   Total Transformer:            {params['transformer']:>11,} params")
+    print(f"\n📈 Model Sizes:")
+    print(f"   Small Model:  {small_total:>15,} parameters ({small_total / 1e6:>8.1f}M)")
+    print(f"   Medium Model: {medium_total:>15,} parameters ({medium_total / 1e6:>8.1f}M)")
+    print(f"   Large Model:  {large_total:>15,} parameters ({large_total / 1e9:>8.2f}B)")
     
-    print("\n" + "="*60)
-    print(f"🎯 Total Model Parameters:      {params['total']:>11,} params")
-    print(f"   Trainable Parameters:        {params['trainable']:>11,} params")
-    print("="*60)
+    print(f"\n📊 Scale Factors:")
+    print(f"   Medium vs Small: {medium_total / small_total:>8.2f}x larger")
+    print(f"   Large vs Medium: {large_total / medium_total:>8.2f}x larger")
+    print(f"   Large vs Small:  {large_total / small_total:>8.2f}x larger")
     
-    # Calculate percentages
-    print("\n📊 Parameter Distribution")
-    print(f"   Embeddings:      {params['embedding'] / params['total'] * 100:>5.1f}%")
-    print(f"   Transformer:     {params['transformer'] / params['total'] * 100:>5.1f}%")
-    print(f"     - Attention:   {(params['attention_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
-    print(f"     - SwiGLU:      {(params['ffn_per_block'] * params['num_layers']) / params['total'] * 100:>5.1f}% of total")
-    print("\n" + "="*60)
+    # Get actual configuration values from saved configs
+    small_config = model_configs_saved['small']
+    medium_config = model_configs_saved['medium']
+    large_config = model_configs_saved['large']
+    
+    print(f"\n🔢 Configuration Comparison:")
+    print(f"   {'Parameter':<20} {'Small':>8} {'Medium':>8} {'Large':>8}")
+    print(f"   {'-'*20} {'-'*8} {'-'*8} {'-'*8}")
+    print(f"   {'Hidden Size':<20} {small_config['hidden_size']:>8} {medium_config['hidden_size']:>8} {large_config['hidden_size']:>8}")
+    print(f"   {'Num Layers':<20} {small_config['num_layers']:>8} {medium_config['num_layers']:>8} {large_config['num_layers']:>8}")
+    print(f"   {'Num Heads':<20} {small_config['num_heads']:>8} {medium_config['num_heads']:>8} {large_config['num_heads']:>8}")
+    print(f"   {'KV Heads':<20} {small_config['num_kv_heads']:>8} {medium_config['num_kv_heads']:>8} {large_config['num_kv_heads']:>8}")
+    print(f"   {'Head Dim':<20} {small_config['hidden_size']//small_config['num_heads']:>8} {medium_config['hidden_size']//medium_config['num_heads']:>8} {large_config['hidden_size']//large_config['num_heads']:>8}")
+    print(f"   {'Max Positions':<20} {small_config['max_position_embeddings']:>8} {medium_config['max_position_embeddings']:>8} {large_config['max_position_embeddings']:>8}")
+    print(f"   {'GQA Ratio':<20} {small_config['num_heads']//small_config['num_kv_heads']:>7}:1 {medium_config['num_heads']//medium_config['num_kv_heads']:>7}:1 {large_config['num_heads']//large_config['num_kv_heads']:>7}:1")
+    
+    print(f"\n💾 Memory Requirements (Weights Only):")
+    print(f"   {'Model':<20} {'FP32':>12} {'BF16/FP16':>12}")
+    print(f"   {'-'*20} {'-'*12} {'-'*12}")
+    print(f"   {'Small':<20} {small_total * 4 / (1024**3):>10.2f} GB {small_total * 2 / (1024**3):>10.2f} GB")
+    print(f"   {'Medium':<20} {medium_total * 4 / (1024**3):>10.2f} GB {medium_total * 2 / (1024**3):>10.2f} GB")
+    print(f"   {'Large':<20} {large_total * 4 / (1024**3):>10.2f} GB {large_total * 2 / (1024**3):>10.2f} GB")
+    
+    print(f"\n⚡ Training Memory Estimates (BF16 with Adam):")
+    # Adam optimizer maintains 2 states per parameter (momentum + variance)
+    # Total = weights (2 bytes) + gradients (2 bytes) + optimizer states (2*2 bytes) = 8 bytes per param
+    optimizer_multiplier = 4  # 8 bytes / 2 bytes base = 4x
+    print(f"   Small:  ~{small_total * 2 * optimizer_multiplier / (1024**3):.1f} GB (weights + gradients + optimizer)")
+    print(f"   Medium: ~{medium_total * 2 * optimizer_multiplier / (1024**3):.1f} GB (weights + gradients + optimizer)")
+    print(f"   Large:  ~{large_total * 2 * optimizer_multiplier / (1024**3):.1f} GB (weights + gradients + optimizer)")
+    print(f"\n   Note: Add ~2-8 GB for activations depending on batch size")
+    
+    print("\n" + "="*70)

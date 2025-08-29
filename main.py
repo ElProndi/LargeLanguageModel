@@ -272,8 +272,8 @@ Examples:
     )
     train_parser.add_argument('--test', action='store_true',
                              help='Run single epoch test')
-    train_parser.add_argument('--model-size', type=str, choices=['small', 'medium'],
-                             help='Model size to use (small or medium)')
+    train_parser.add_argument('--model-size', type=str, choices=['small', 'medium', 'large'],
+                             help='Model size to use (small, medium, or large)')
     train_parser.add_argument('--config', type=str,
                              help='Path to config file')
     train_parser.add_argument('--resume', type=str,
