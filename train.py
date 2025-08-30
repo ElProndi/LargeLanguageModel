@@ -242,7 +242,7 @@ class Trainer:
         # No need to call model.to(device) - model is already on GPU
         
         # Enable gradient checkpointing for memory efficiency
-        # model.enable_gradient_checkpointing()  # Temporarily disabled
+        model.enable_gradient_checkpointing()  # Enable for significant memory savings
         
         # Model compilation (commented out by default)
         # Uncomment to enable torch.compile for faster training:

@@ -1026,7 +1026,7 @@ def main():
         
         # Memory warning for multiple models
         estimated_memory_per_model = 0.1  # ~100MB per model
-        estimated_total_memory = len(checkpoint_paths) * estimated_memory_per_model
+        estimated_total_memory = len(checkpoint_info) * estimated_memory_per_model
         
         if device.type == 'cuda':
             available_memory = torch.cuda.get_device_properties(0).total_memory / 1e9

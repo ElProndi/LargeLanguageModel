@@ -18,7 +18,7 @@
       "hidden_size": 768,
       "num_layers": 12,
       "num_heads": 12,
-      "num_kv_heads": 3,
+      "num_kv_heads": 1,
       "max_position_embeddings": 512,
       "dropout": 0.1,
       "attention_dropout": 0.1,
@@ -57,8 +57,8 @@
   },
   
   "training": {
-    "batch_size": 32,
-    "gradient_accumulation_steps": 16,
+    "batch_size": 16,
+    "gradient_accumulation_steps": 32,
     "max_steps": 50000,
     "learning_rate": 0.001,
     "min_learning_rate": 0.0001,
