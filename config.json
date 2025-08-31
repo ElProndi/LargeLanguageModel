@@ -18,7 +18,7 @@
       "hidden_size": 768,
       "num_layers": 12,
       "num_heads": 12,
-      "num_kv_heads": 1,
+      "num_kv_heads": 3,
       "max_position_embeddings": 512,
       "dropout": 0.1,
       "attention_dropout": 0.1,
@@ -91,14 +91,14 @@
   
   "pytorch_backend": {
     "allow_tf32": true,
-    "matmul_precision": "medium"
+    "matmul_precision": "high"
   },
   
   "architecture_features": {
-    "use_gqa": false,
+    "use_gqa": true,
     "use_scaled_residuals": false,
     "use_gradient_checkpointing": false,
     "use_flash_attention": false,
-    "tie_embeddings": false
+    "tie_embeddings": true
   }
 }

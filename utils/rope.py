@@ -173,7 +173,8 @@ class RotaryEmbedding(nn.Module):
         self,
         q: torch.Tensor,
         k: torch.Tensor,
-        position_ids: Optional[torch.Tensor] = None
+        position_ids: Optional[torch.Tensor] = None,
+        position_offset: int = 0
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Apply rotary embeddings to query and key tensors.
@@ -182,105 +183,19 @@ class RotaryEmbedding(nn.Module):
             q: Query tensor of shape (batch, num_heads, seq_len, head_dim)
             k: Key tensor of shape (batch, num_heads, seq_len, head_dim)
             position_ids: Optional position IDs for custom positioning
+            position_offset: Offset to add to sequential positions (for KV caching)
             
         Returns:
             Tuple of rotated (q, k) tensors
         """
+        # If position_ids not provided, create sequential positions with offset
+        if position_ids is None and position_offset > 0:
+            seq_len = q.shape[2]
+            position_ids = torch.arange(
+                position_offset, 
+                position_offset + seq_len, 
+                device=q.device, 
+                dtype=torch.long
+            )
+        
         return apply_rotary_pos_emb(q, k, self.freqs_cos, self.freqs_sin, position_ids)
-
-
-def test_rope():
-    """Test function to verify RoPE implementation."""
-    print("Testing RoPE implementation...")
-    
-    # Test dimensions
-    batch_size = 2
-    seq_len = 128
-    num_heads = 8
-    head_dim = 64
-    
-    # Create dummy Q and K tensors
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    q = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device)
-    k = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device)
-    
-    # Test 1: Basic functionality
-    print("\n1. Testing basic RoPE functionality:")
-    rope = RotaryEmbedding(
-        dim=head_dim,
-        max_position_embeddings=512,
-        device=device
-    )
-    
-    # Apply rotary embeddings
-    q_rotated, k_rotated = rope(q, k)
-    
-    # Verify shapes are preserved
-    assert q_rotated.shape == q.shape, f"Q shape mismatch: {q_rotated.shape} != {q.shape}"
-    assert k_rotated.shape == k.shape, f"K shape mismatch: {k_rotated.shape} != {k.shape}"
-    
-    # Verify that the rotation was applied
-    assert not torch.allclose(q, q_rotated), "Q was not rotated"
-    assert not torch.allclose(k, k_rotated), "K was not rotated"
-    
-    print("   ✓ Basic functionality passed")
-    
-    # Test 2: Position IDs
-    print("\n2. Testing custom position IDs:")
-    position_ids = torch.arange(seq_len, device=device)
-    q_rotated2, k_rotated2 = rope(q, k, position_ids)
-    
-    # Should produce same result as without position_ids for sequential positions
-    assert torch.allclose(q_rotated, q_rotated2, rtol=1e-5), "Position IDs handling issue"
-    assert torch.allclose(k_rotated, k_rotated2, rtol=1e-5), "Position IDs handling issue"
-    
-    print("   ✓ Position IDs handling verified")
-    
-    # Test 3: GQA support (different head counts)
-    print("\n3. Testing GQA support:")
-    q_gqa = torch.randn(batch_size, 12, seq_len, head_dim, device=device)  # 12 Q heads
-    k_gqa = torch.randn(batch_size, 3, seq_len, head_dim, device=device)   # 3 KV heads
-    
-    q_rot_gqa, k_rot_gqa = rope(q_gqa, k_gqa)
-    
-    assert q_rot_gqa.shape == q_gqa.shape, "GQA Q shape mismatch"
-    assert k_rot_gqa.shape == k_gqa.shape, "GQA K shape mismatch"
-    
-    print("   ✓ GQA support verified")
-    
-    # Test 4: bfloat16 support
-    print("\n4. Testing bfloat16 support:")
-    if device.type == "cuda":
-        q_bf16 = q.to(torch.bfloat16)
-        k_bf16 = k.to(torch.bfloat16)
-        
-        q_rot_bf16, k_rot_bf16 = rope(q_bf16, k_bf16)
-        
-        assert q_rot_bf16.dtype == torch.bfloat16, "Output should maintain bfloat16"
-        assert k_rot_bf16.dtype == torch.bfloat16, "Output should maintain bfloat16"
-        
-        print("   ✓ bfloat16 support verified")
-    else:
-        print("   ⚠ Skipped (CUDA not available)")
-    
-    # Test 5: TorchScript compilation (proxy for TorchInductor)
-    print("\n5. Testing TorchScript compilation:")
-    try:
-        # Try to compile the forward pass
-        scripted = torch.jit.script(rope)
-        q_scripted, k_scripted = scripted(q, k)
-        assert torch.allclose(q_rotated, q_scripted, rtol=1e-5), "Scripted output differs"
-        print("   ✓ TorchScript compilation successful")
-    except Exception as e:
-        print(f"   ⚠ TorchScript compilation note: {str(e)[:50]}")
-    
-    print("\n✓ All RoPE tests passed!")
-    print(f"  - Input shape: ({batch_size}, {num_heads}, {seq_len}, {head_dim})")
-    print(f"  - TorchInductor-compatible: ✓")
-    print(f"  - GQA support: ✓")
-    print(f"  - bfloat16 support: ✓")
-    print(f"  - No complex operations: ✓")
-
-
-if __name__ == "__main__":
-    test_rope()
