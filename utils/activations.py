@@ -50,9 +50,9 @@ class SwiGLU(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         
-        # Three projection layers for SwiGLU
-        self.w_gate = nn.Linear(hidden_size, intermediate_size, bias=bias)
-        self.w_up = nn.Linear(hidden_size, intermediate_size, bias=bias)
+        # Fused projection for gate and up - single GEMM for better performance
+        # Output size is 2 * intermediate_size (gate + up concatenated)
+        self.w_fused = nn.Linear(hidden_size, 2 * intermediate_size, bias=bias)
         self.w_down = nn.Linear(intermediate_size, hidden_size, bias=bias)
         
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
@@ -67,13 +67,14 @@ class SwiGLU(nn.Module):
         Returns:
             Output tensor of shape (..., hidden_size)
         """
-        # Apply gate and up projections
-        gate = self.w_gate(x)
-        up = self.w_up(x)
+        # Apply fused projection and split into gate and up components
+        # Single GEMM operation for better memory bandwidth utilization
+        fused_output = self.w_fused(x)
+        gate, up = fused_output.chunk(2, dim=-1)
         
-        # Apply Swish activation to gate and element-wise multiply with up
+        # Apply Swish activation to gate (in-place for memory efficiency)
         # Swish(x) = x * sigmoid(x) = x * (1 / (1 + exp(-x)))
-        gate = F.silu(gate)  # SiLU is equivalent to Swish
+        gate = gate * torch.sigmoid(gate)  # Manual SiLU/Swish for memory efficiency
         
         # Element-wise multiplication (gating mechanism)
         intermediate = gate * up
@@ -88,23 +89,23 @@ class SwiGLU(nn.Module):
     
     def get_num_params(self) -> dict:
         """Get parameter count breakdown."""
-        gate_params = self.w_gate.weight.numel()
-        if self.w_gate.bias is not None:
-            gate_params += self.w_gate.bias.numel()
-        
-        up_params = self.w_up.weight.numel()
-        if self.w_up.bias is not None:
-            up_params += self.w_up.bias.numel()
+        fused_params = self.w_fused.weight.numel()
+        if self.w_fused.bias is not None:
+            fused_params += self.w_fused.bias.numel()
         
         down_params = self.w_down.weight.numel()
         if self.w_down.bias is not None:
             down_params += self.w_down.bias.numel()
         
+        # Split fused params for reporting (gate and up have same size)
+        gate_up_params_each = fused_params // 2
+        
         return {
-            'gate': gate_params,
-            'up': up_params,
+            'gate': gate_up_params_each,
+            'up': gate_up_params_each,
+            'fused': fused_params,
             'down': down_params,
-            'total': gate_params + up_params + down_params
+            'total': fused_params + down_params
         }
 
 
@@ -224,8 +225,7 @@ def test_swiglu():
     
     # Verify gradient flow
     output.sum().backward()
-    assert swiglu.w_gate.weight.grad is not None, "No gradients for gate weights"
-    assert swiglu.w_up.weight.grad is not None, "No gradients for up weights"
+    assert swiglu.w_fused.weight.grad is not None, "No gradients for fused weights"
     assert swiglu.w_down.weight.grad is not None, "No gradients for down weights"
     
     # Get parameter count

@@ -59,8 +59,8 @@ class ScaledResidual(nn.Module):
 
 class FastMultiHeadAttention(nn.Module):
     """
-    Optimized Multi-Head Attention with Grouped Query Attention (GQA) support.
-    Uses RoPE for position encoding and forced Flash Attention for maximum performance.
+    Optimized Multi-Head Attention with optional Grouped Query Attention (GQA) support.
+    Uses RoPE for position encoding and optional Flash Attention for maximum performance.
     """
     
     def __init__(
@@ -72,14 +72,25 @@ class FastMultiHeadAttention(nn.Module):
         bias: bool = True,
         max_position_embeddings: int = 512,
         rope_theta: float = 10000.0,
-        rope_scaling: float = 1.0
+        rope_scaling: float = 1.0,
+        use_gqa: bool = True,
+        use_flash_attention: bool = True
     ):
         super().__init__()
         assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
         
         self.hidden_size = hidden_size
         self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        self.use_gqa = use_gqa
+        self.use_flash_attention = use_flash_attention
+        
+        # Handle GQA configuration
+        if use_gqa and num_kv_heads is not None:
+            self.num_kv_heads = num_kv_heads
+        else:
+            # If GQA is disabled or num_kv_heads not specified, use standard MHA
+            self.num_kv_heads = num_heads
+        
         self.head_dim = hidden_size // num_heads
         self.scale = self.head_dim ** -0.5
         
@@ -88,16 +99,17 @@ class FastMultiHeadAttention(nn.Module):
             f"num_heads ({num_heads}) must be divisible by num_kv_heads ({self.num_kv_heads})"
         self.num_groups = self.num_heads // self.num_kv_heads
         
-        # Separate projections for GQA
-        # Q projection uses all heads, KV projections use fewer heads
+        # Separate Q projection, fused KV projection for efficiency
+        # Q projection uses all heads
         self.q_proj = nn.Linear(hidden_size, self.num_heads * self.head_dim, bias=bias)
-        self.k_proj = nn.Linear(hidden_size, self.num_kv_heads * self.head_dim, bias=bias)
-        self.v_proj = nn.Linear(hidden_size, self.num_kv_heads * self.head_dim, bias=bias)
+        
+        # Fused KV projection: single GEMM producing both K and V
+        # Output size is 2 * (num_kv_heads * head_dim) for concatenated K and V
+        self.kv_proj = nn.Linear(hidden_size, 2 * self.num_kv_heads * self.head_dim, bias=bias)
         
         # Mark attention projections for specialized initialization
         self.q_proj._is_attention_qkv = True
-        self.k_proj._is_attention_qkv = True
-        self.v_proj._is_attention_qkv = True
+        self.kv_proj._is_attention_qkv = True
         
         # Output projection
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=bias)
@@ -123,12 +135,16 @@ class FastMultiHeadAttention(nn.Module):
     ) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
         
-        # Compute Q, K, V projections separately for GQA
+        # Compute Q and fused KV projections
         # Q: (batch, seq_len, num_heads * head_dim)
         q = self.q_proj(hidden_states)
-        # K, V: (batch, seq_len, num_kv_heads * head_dim)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        
+        # Fused KV: (batch, seq_len, 2 * num_kv_heads * head_dim)
+        kv = self.kv_proj(hidden_states)
+        
+        # Split KV into separate K and V tensors
+        # Each will be (batch, seq_len, num_kv_heads * head_dim)
+        k, v = kv.chunk(2, dim=-1)
         
         # Reshape Q to (batch, num_heads, seq_len, head_dim)
         q = q.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
@@ -145,13 +161,22 @@ class FastMultiHeadAttention(nn.Module):
         
         # Expand K and V to match Q heads for GQA
         if self.num_kv_heads != self.num_heads:
-            # Repeat KV heads to match Q heads
+            # Use expand instead of repeat_interleave for memory efficiency
+            # This creates a view without copying data - SDPA can handle strided tensors
             # Shape: (batch, num_kv_heads, seq_len, head_dim) -> (batch, num_heads, seq_len, head_dim)
-            k = k.repeat_interleave(self.num_groups, dim=1)
-            v = v.repeat_interleave(self.num_groups, dim=1)
+            batch_size, num_kv_heads, seq_len, head_dim = k.shape
+            
+            # Reshape to add a new dimension for groups, then expand
+            k = k.reshape(batch_size, num_kv_heads, 1, seq_len, head_dim)
+            k = k.expand(batch_size, num_kv_heads, self.num_groups, seq_len, head_dim)
+            k = k.reshape(batch_size, self.num_heads, seq_len, head_dim)
+            
+            v = v.reshape(batch_size, num_kv_heads, 1, seq_len, head_dim)
+            v = v.expand(batch_size, num_kv_heads, self.num_groups, seq_len, head_dim)
+            v = v.reshape(batch_size, self.num_heads, seq_len, head_dim)
         
-        # Use Flash Attention backend for optimal performance when available
-        if torch.cuda.is_available():
+        # Use Flash Attention backend for optimal performance when requested and available
+        if self.use_flash_attention and torch.cuda.is_available():
             try:
                 # Try to use Flash Attention backend
                 with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
@@ -173,7 +198,7 @@ class FastMultiHeadAttention(nn.Module):
                         scale=self.scale
                     )
         else:
-            # CPU fallback - let PyTorch choose the best backend
+            # Standard SDPA - let PyTorch choose the best backend
             attn_output = F.scaled_dot_product_attention(
                 q, k, v,
                 attn_mask=attention_mask,
@@ -195,7 +220,7 @@ class FastTransformerDecoderLayer(nn.Module):
     """
     Optimized Transformer Decoder Layer using FastMultiHeadAttention with RoPE.
     Uses SwiGLU activation and RMSNorm with pre-norm architecture for better training stability.
-    Includes residual scaling and gradient checkpointing support.
+    Includes optional residual scaling and gradient checkpointing support.
     """
     
     def __init__(
@@ -214,7 +239,9 @@ class FastTransformerDecoderLayer(nn.Module):
         layer_idx: int = 0,
         num_layers: int = 1,
         use_scaled_residuals: bool = True,
-        use_gradient_checkpointing: bool = False
+        use_gradient_checkpointing: bool = False,
+        use_gqa: bool = True,
+        use_flash_attention: bool = True
     ):
         super().__init__()
         
@@ -230,7 +257,9 @@ class FastTransformerDecoderLayer(nn.Module):
             bias=bias,
             max_position_embeddings=max_position_embeddings,
             rope_theta=rope_theta,
-            rope_scaling=rope_scaling
+            rope_scaling=rope_scaling,
+            use_gqa=use_gqa,
+            use_flash_attention=use_flash_attention
         )
         
         # Feed-forward network - always use SwiGLU for better gradient flow
@@ -373,7 +402,9 @@ class FastTransformerDecoder(nn.Module):
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
         use_scaled_residuals: bool = True,
-        use_gradient_checkpointing: bool = False
+        use_gradient_checkpointing: bool = False,
+        use_gqa: bool = True,
+        use_flash_attention: bool = True
     ):
         super().__init__()
         
@@ -397,7 +428,9 @@ class FastTransformerDecoder(nn.Module):
                 layer_idx=i,
                 num_layers=num_layers,
                 use_scaled_residuals=use_scaled_residuals,
-                use_gradient_checkpointing=use_gradient_checkpointing
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                use_gqa=use_gqa,
+                use_flash_attention=use_flash_attention
             )
             for i in range(num_layers)
         ])
@@ -446,7 +479,10 @@ class TransformerLM(nn.Module):
         pad_token_id: int = 2,  # Same as EOS token (CodeLlama convention)
         eos_token_id: int = 2,
         use_scaled_residuals: bool = True,
-        use_gradient_checkpointing: bool = False
+        use_gradient_checkpointing: bool = False,
+        use_gqa: bool = True,
+        use_flash_attention: bool = True,
+        tie_embeddings: bool = True
     ):
         super().__init__()
         
@@ -476,7 +512,10 @@ class TransformerLM(nn.Module):
             'pad_token_id': pad_token_id,
             'eos_token_id': eos_token_id,
             'use_scaled_residuals': use_scaled_residuals,
-            'use_gradient_checkpointing': use_gradient_checkpointing
+            'use_gradient_checkpointing': use_gradient_checkpointing,
+            'use_gqa': use_gqa,
+            'use_flash_attention': use_flash_attention,
+            'tie_embeddings': tie_embeddings
         }
         
         # Token embeddings only (RoPE handles position encoding)
@@ -485,7 +524,7 @@ class TransformerLM(nn.Module):
         # Embedding dropout
         self.embedding_dropout = nn.Dropout(dropout)
         
-        # Use optimized FastTransformerDecoder with GQA, RoPE, SwiGLU, and RMSNorm
+        # Use optimized FastTransformerDecoder with configurable features
         self.transformer = FastTransformerDecoder(
             num_layers=num_layers,
             hidden_size=hidden_size,
@@ -500,14 +539,17 @@ class TransformerLM(nn.Module):
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             use_scaled_residuals=use_scaled_residuals,
-            use_gradient_checkpointing=use_gradient_checkpointing
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gqa=use_gqa,
+            use_flash_attention=use_flash_attention
         )
         
-        # Language modeling head (always tied with input embeddings)
+        # Language modeling head (optionally tied with input embeddings)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
         
-        # Always tie weights between input and output embeddings
-        self.lm_head.weight = self.embeddings.weight
+        # Optionally tie weights between input and output embeddings
+        if tie_embeddings:
+            self.lm_head.weight = self.embeddings.weight
         
         # Initialize weights
         self.apply(self._init_weights)
@@ -524,9 +566,6 @@ class TransformerLM(nn.Module):
         depth_scale = 1.0 / math.sqrt(2 * num_layers) if num_layers > 1 else 1.0
         
         if isinstance(module, nn.Linear):
-            # Get the parent module name for context
-            parent_name = module.__class__.__name__ if hasattr(module, '__class__') else ''
-            
             # Check if this is part of attention mechanism
             if hasattr(module, '_is_attention_qkv'):
                 # Query, Key, Value projections - use scaled initialization
@@ -571,23 +610,18 @@ class TransformerLM(nn.Module):
             
         elif isinstance(module, SwiGLU):
             # Special initialization for SwiGLU components
-            # Gate and up projections: Xavier uniform
-            if hasattr(module, 'gate_proj'):
-                nn.init.xavier_uniform_(module.gate_proj.weight, gain=1.0)
-                if module.gate_proj.bias is not None:
-                    module.gate_proj.bias.data.zero_()
-                    
-            if hasattr(module, 'up_proj'):
-                nn.init.xavier_uniform_(module.up_proj.weight, gain=1.0)
-                if module.up_proj.bias is not None:
-                    module.up_proj.bias.data.zero_()
+            # Fused gate+up projection: Xavier uniform
+            if hasattr(module, 'w_fused'):
+                nn.init.xavier_uniform_(module.w_fused.weight, gain=1.0)
+                if module.w_fused.bias is not None:
+                    module.w_fused.bias.data.zero_()
                     
             # Down projection: scaled by depth
-            if hasattr(module, 'down_proj'):
+            if hasattr(module, 'w_down'):
                 std = self.config['initializer_range'] * depth_scale
-                module.down_proj.weight.data.normal_(mean=0.0, std=std)
-                if module.down_proj.bias is not None:
-                    module.down_proj.bias.data.zero_()
+                module.w_down.weight.data.normal_(mean=0.0, std=std)
+                if module.w_down.bias is not None:
+                    module.w_down.bias.data.zero_()
     
     def enable_gradient_checkpointing(self):
         """Enable gradient checkpointing for memory-efficient training."""
@@ -897,12 +931,12 @@ class TransformerLM(nn.Module):
         num_kv_heads = self.config['num_kv_heads']
         head_dim = hidden_size // num_heads
         
-        # Attention module parameters with GQA
+        # Attention module parameters with GQA and fused KV projection
         q_proj_params = hidden_size * (num_heads * head_dim)  # Q projection
-        k_proj_params = hidden_size * (num_kv_heads * head_dim)  # K projection (smaller with GQA)
-        v_proj_params = hidden_size * (num_kv_heads * head_dim)  # V projection (smaller with GQA)
+        # Fused KV projection: outputs 2 * (num_kv_heads * head_dim) for both K and V
+        kv_proj_params = hidden_size * (2 * num_kv_heads * head_dim)  # Fused KV projection
         o_proj_params = hidden_size * hidden_size  # Output projection
-        attention_params = q_proj_params + k_proj_params + v_proj_params + o_proj_params
+        attention_params = q_proj_params + kv_proj_params + o_proj_params
         
         # Feed-forward network parameters - SwiGLU always uses 3 matrices
         # SwiGLU uses gate, up, and down projections
@@ -992,8 +1026,9 @@ def create_model(config_path: str = "config.json", model_size: str = None) -> Tr
         model_config = config['model']
     tokenizer_config = config.get('tokenizer', {})
     rope_config = config.get('rope', {})
+    architecture_features = config.get('architecture_features', {})
     
-    # Create model with configuration, including GQA, RoPE, SwiGLU, RMSNorm, and Flash Attention
+    # Create model with configuration, including optional architecture features
     model = TransformerLM(
         vocab_size=model_config['vocab_size'],
         hidden_size=model_config['hidden_size'],
@@ -1010,12 +1045,19 @@ def create_model(config_path: str = "config.json", model_size: str = None) -> Tr
         initializer_range=model_config['initializer_range'],
         use_cache=model_config['use_cache'],
         pad_token_id=tokenizer_config.get('pad_token_id', 2),
-        eos_token_id=tokenizer_config.get('eos_token_id', 2)
+        eos_token_id=tokenizer_config.get('eos_token_id', 2),
+        # Architecture feature flags (with defaults for backward compatibility)
+        use_scaled_residuals=architecture_features.get('use_scaled_residuals', True),
+        use_gradient_checkpointing=architecture_features.get('use_gradient_checkpointing', False),
+        use_gqa=architecture_features.get('use_gqa', True),
+        use_flash_attention=architecture_features.get('use_flash_attention', True),
+        tie_embeddings=architecture_features.get('tie_embeddings', True)
     )
     
     # Get parameter count for logging
     params = model.get_num_params()
     
+    # Always compile for massive speedup (2-3x faster)
     model = torch.compile(model)
     print(f"Model created: {params['total']:,} parameters")
 

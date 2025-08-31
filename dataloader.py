@@ -58,9 +58,6 @@ class SimpleDataset(Dataset):
             if not torch.cuda.is_available():
                 raise RuntimeError("CUDA requested but not available")
             self.data = self.data.to('cuda')
-        elif device == 'cpu' and torch.cuda.is_available():
-            # Pin memory for faster GPU transfers during validation
-            self.data = self.data.pin_memory()
         
         if verbose:
             pass  # Dataset created silently

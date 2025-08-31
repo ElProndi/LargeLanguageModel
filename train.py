@@ -33,7 +33,8 @@ class Trainer:
         model_size: str = None,
         test_mode: bool = False,
         resume_from: Optional[str] = None,
-        experiment_name: Optional[str] = None
+        experiment_name: Optional[str] = None,
+        train_quarter: bool = False
     ):
         """Initialize trainer with configuration.
         
@@ -43,11 +44,13 @@ class Trainer:
             test_mode: Use smaller dataset for testing
             resume_from: Path to checkpoint to resume from
             experiment_name: Name for this training run
+            train_quarter: If True, train on single quarter only. If False (default), train on all quarters sequentially.
         """
         print(f"Initializing Transformer Language Model Trainer")
         
-        # Store model size
+        # Store model size and training mode
         self.model_size = model_size
+        self.train_quarter = train_quarter
         
         # Load configuration
         with open(config_path, 'r') as f:
@@ -61,7 +64,7 @@ class Trainer:
         self.test_mode = test_mode
         if test_mode:
             print("🧪 Running in TEST MODE - using reduced dataset and steps")
-            self.config['training']['max_steps'] = 100  # Only 100 steps for test mode
+            # max_steps will be calculated dynamically based on test dataset size
             self.config['logging']['eval_steps'] = 50  # Not used anymore, validation_interval is used instead
             self.config['logging']['save_steps'] = 50   # Save checkpoint every 50 steps in test mode
             self.config['logging']['logging_steps'] = 5
@@ -113,7 +116,7 @@ class Trainer:
         
         # Initialize training state early for calculations
         self.global_step = 0
-        self.max_steps = self.config['training']['max_steps']
+        # max_steps will be calculated dynamically based on dataset size
         self.best_val_loss = float('inf')
         self.completed_fourths = []  # Track which fourths have been completed
         self.recent_step_times = deque(maxlen=5)  # Track last 5 step times for ETA calculation
@@ -165,33 +168,41 @@ class Trainer:
             dataset_source=self.dataset_source
         )
         
-        # Calculate batch counts - we have 4 fourths, sum their batches
-        # Note: The fourths may have slightly different batch counts due to file distribution
-        self.batches_per_epoch = (first_fourth_stats['train_batches'] + 
-                                   second_fourth_stats['train_batches'] + 
-                                   third_fourth_stats['train_batches'] + 
-                                   fourth_fourth_stats['train_batches'])
+        # Calculate batch counts and dynamic max_steps based on actual dataset size
+        num_epochs = self.config['training'].get('num_epochs', 1)
         
-        # With gradient accumulation, optimizer steps = batches / accumulation_steps
-        self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
-        # Handle remainder batches (last incomplete accumulation in epoch)
-        if self.batches_per_epoch % self.gradient_accumulation_steps != 0:
-            self.steps_per_epoch += 1
-        
-        # Set total training steps to max_steps from config
-        self.total_training_steps = self.max_steps
-        
-        # Dynamic step calculation for completing current fourth only
-        if not resume_from:
-            # Starting fresh - calculate steps needed to complete first fourth
-            steps_in_first_fourth = first_fourth_stats['train_batches'] // self.gradient_accumulation_steps
-            if first_fourth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
-                steps_in_first_fourth += 1
+        if self.train_quarter:
+            # Train on single quarter only - calculate steps for first fourth
+            self.batches_per_epoch = first_fourth_stats['train_batches']
+            self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
+            if self.batches_per_epoch % self.gradient_accumulation_steps != 0:
+                self.steps_per_epoch += 1
             
-            # Override max_steps to complete only first fourth
-            self.max_steps = steps_in_first_fourth
+            # Set max_steps for single quarter with epochs
+            self.max_steps = self.steps_per_epoch * num_epochs
             self.total_training_steps = self.max_steps
-            print(f"  • Training will complete first_fourth only: {self.max_steps} steps")
+            
+            if not resume_from:
+                print(f"  • Training on first_fourth only: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
+        else:
+            # Train on all quarters sequentially - sum all four quarters
+            self.batches_per_epoch = (first_fourth_stats['train_batches'] + 
+                                       second_fourth_stats['train_batches'] + 
+                                       third_fourth_stats['train_batches'] + 
+                                       fourth_fourth_stats['train_batches'])
+            
+            # With gradient accumulation, optimizer steps = batches / accumulation_steps
+            self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
+            # Handle remainder batches (last incomplete accumulation in epoch)
+            if self.batches_per_epoch % self.gradient_accumulation_steps != 0:
+                self.steps_per_epoch += 1
+            
+            # Set max_steps for all quarters with epochs
+            self.max_steps = self.steps_per_epoch * num_epochs
+            self.total_training_steps = self.max_steps
+            
+            if not resume_from:
+                print(f"  • Training on all 4 quarters: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
         
         # Validation frequency: doubled - every 500 steps (or less for test mode)
         if self.test_mode:
@@ -241,8 +252,13 @@ class Trainer:
         )
         # No need to call model.to(device) - model is already on GPU
         
-        # Enable gradient checkpointing for memory efficiency
-        model.enable_gradient_checkpointing()  # Enable for significant memory savings
+        # Enable gradient checkpointing based on config
+        architecture_features = self.config.get('architecture_features', {})
+        if architecture_features.get('use_gradient_checkpointing', False):
+            model.enable_gradient_checkpointing()  # Enable for significant memory savings
+            print("✓ Gradient checkpointing enabled (from config)")
+        else:
+            print("✓ Gradient checkpointing disabled (from config)")
         
         # Model compilation (commented out by default)
         # Uncomment to enable torch.compile for faster training:
@@ -715,30 +731,70 @@ class Trainer:
                 print(f"  All fourths completed! Training is finished.")
                 saved_subset = 'fourth_fourth'  # Stay on last fourth
         
-        # Calculate steps needed to complete the current fourth
+        # Recalculate steps dynamically based on train_quarter flag and remaining data
         from dataloader import calculate_dataloader_stats
-        current_fourth_stats = calculate_dataloader_stats(
-            batch_size=self.config['training']['batch_size'],
-            val_split=0.1,
-            test_mode=self.test_mode,
-            file_subset=saved_subset,
-            dataset_source=self.dataset_source
-        )
         
-        steps_in_current_fourth = current_fourth_stats['train_batches'] // self.gradient_accumulation_steps
-        if current_fourth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
-            steps_in_current_fourth += 1
+        # Get num_epochs from config
+        num_epochs = self.config['training'].get('num_epochs', 1)
         
-        # Set max_steps to complete current fourth
-        self.max_steps = self.global_step + steps_in_current_fourth
-        self.total_training_steps = self.max_steps
+        if self.train_quarter:
+            # Train on single quarter only
+            current_fourth_stats = calculate_dataloader_stats(
+                batch_size=self.config['training']['batch_size'],
+                val_split=0.1,
+                test_mode=self.test_mode,
+                file_subset=saved_subset,
+                dataset_source=self.dataset_source
+            )
+            
+            steps_in_current_fourth = current_fourth_stats['train_batches'] // self.gradient_accumulation_steps
+            if current_fourth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
+                steps_in_current_fourth += 1
+            
+            # For train_quarter mode, complete the remaining steps of the current fourth
+            # accounting for the epochs
+            self.max_steps = steps_in_current_fourth * num_epochs
+            self.total_training_steps = self.max_steps
+        else:
+            # Train on all quarters sequentially
+            # Calculate total steps for ALL fourths (not just remaining)
+            data_fourths = ['first_fourth', 'second_fourth', 'third_fourth', 'fourth_fourth']
+            total_steps = 0
+            
+            for fourth in data_fourths:
+                fourth_stats = calculate_dataloader_stats(
+                    batch_size=self.config['training']['batch_size'],
+                    val_split=0.1,
+                    test_mode=self.test_mode,
+                    file_subset=fourth,
+                    dataset_source=self.dataset_source
+                )
+                steps_in_fourth = fourth_stats['train_batches'] // self.gradient_accumulation_steps
+                if fourth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
+                    steps_in_fourth += 1
+                total_steps += steps_in_fourth
+            
+            # Set max_steps for all quarters with epochs
+            self.max_steps = total_steps * num_epochs
+            self.total_training_steps = self.max_steps
         
         print(f"  Resumed from step {self.global_step}")
         print(f"  Best validation loss: {self.best_val_loss:.4f}")
         print(f"  Data subset: {saved_subset}")
         print(f"  Completed fourths: {self.completed_fourths}")
-        print(f"  Will complete {saved_subset}: {steps_in_current_fourth} more steps")
-        print(f"  New max_steps: {self.max_steps}")
+        
+        # Calculate progress information
+        remaining_steps = self.max_steps - self.global_step
+        progress_percent = (self.global_step / self.max_steps * 100) if self.max_steps > 0 else 0
+        
+        if self.train_quarter:
+            print(f"  Mode: Single quarter training")
+            print(f"  Progress: {self.global_step}/{self.max_steps} steps ({progress_percent:.1f}%)")
+            print(f"  Remaining: {remaining_steps} steps")
+        else:
+            print(f"  Mode: All quarters training ({num_epochs} epoch{'s' if num_epochs > 1 else ''})")
+            print(f"  Progress: {self.global_step}/{self.max_steps} steps ({progress_percent:.1f}%)")
+            print(f"  Remaining: {remaining_steps} steps")
         
         # Load the appropriate data subset
         if saved_subset:
@@ -884,11 +940,24 @@ class Trainer:
                                 else:
                                     eta_str = " | ETA: Complete"
                             
-                            # Print step metrics with data subset indicator and ETA
+                            # Map fourth names to fractions for cleaner display
+                            fourth_labels = {
+                                'first_fourth': '1/4',
+                                'second_fourth': '2/4',
+                                'third_fourth': '3/4',
+                                'fourth_fourth': '4/4'
+                            }
+                            fourth_label = fourth_labels.get(data_fourth, data_fourth)
+                            
+                            # Get current learning rate
+                            current_lr = self.optimizer.param_groups[0]['lr']
+                            
+                            # Print step metrics with data subset indicator, learning rate, and ETA
                             # Time shown is TOTAL time for all gradient accumulation steps
-                            print(f"[{data_fourth:12s}] Step {self.global_step:5d}/{self.total_training_steps} | "
+                            print(f"[{fourth_label:3s}] Step {self.global_step:5d}/{self.total_training_steps} | "
                                   f"{iteration_time * 1000:6.0f}ms | "
                                   f"Loss: {avg_loss:7.4f} | "
+                                  f"LR: {current_lr:.2e} | "
                                   f"PPL: {perplexity:8.2f} | "
                                   f"Tokens/s: {tokens_per_second:8.0f}{eta_str}")
                             
@@ -950,12 +1019,23 @@ class Trainer:
                             print(f"\n🎉 All fourths completed! Training finished.")
                             break
                 
-                # Check if we should stop after completing current fourth
+                # Check if we should continue or stop based on train_quarter flag
                 if self.global_step >= self.max_steps:
-                    print(f"\nCompleted current fourth. Stopping training.")
-                    break
-                    
-                # Don't reset to first_fourth - training stops after current fourth
+                    if self.train_quarter:
+                        print(f"\nCompleted current fourth. Stopping training (--train-quarter mode).")
+                        break
+                    else:
+                        # In full training mode, we've completed all fourths
+                        print(f"\nCompleted all training steps across all fourths.")
+                        break
+                
+                # Reset to first_fourth for next epoch if not in train_quarter mode
+                if not self.train_quarter and fourth_idx == len(data_fourths) - 1:
+                    # Completed all fourths but haven't reached max_steps
+                    # Reset for another pass through the data
+                    current_fourth_idx = 0
+                    self.completed_fourths = []  # Reset completed fourths for next epoch
+                    print(f"\nStarting new epoch through all fourths...")
         
         except KeyboardInterrupt:
             print("\n\nTraining interrupted by user")
@@ -1001,6 +1081,8 @@ def main():
                        help='Path to checkpoint to resume from')
     parser.add_argument('--name', type=str, default=None,
                        help='Experiment name for logging')
+    parser.add_argument('--train-quarter', action='store_true',
+                       help='Train on single quarter of dataset only (default: train on all quarters sequentially)')
     
     args = parser.parse_args()
     
@@ -1010,7 +1092,8 @@ def main():
         model_size=args.model_size,
         test_mode=args.test,
         resume_from=args.resume,
-        experiment_name=args.name
+        experiment_name=args.name,
+        train_quarter=args.train_quarter
     )
     
     trainer.train()

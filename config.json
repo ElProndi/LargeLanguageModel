@@ -57,10 +57,10 @@
   },
   
   "training": {
-    "batch_size": 16,
+    "batch_size": 32,
     "gradient_accumulation_steps": 32,
-    "max_steps": 50000,
-    "learning_rate": 0.001,
+    "num_epochs": 1,
+    "learning_rate": 0.0006,
     "min_learning_rate": 0.0001,
     "warmup_ratio": 0.02,
     "cosine_target_ratio": 0.8,
@@ -92,5 +92,13 @@
   "pytorch_backend": {
     "allow_tf32": true,
     "matmul_precision": "medium"
+  },
+  
+  "architecture_features": {
+    "use_gqa": false,
+    "use_scaled_residuals": false,
+    "use_gradient_checkpointing": false,
+    "use_flash_attention": false,
+    "tie_embeddings": false
   }
 }
