@@ -16,7 +16,7 @@
     "medium": {
       "vocab_size": 32016,
       "hidden_size": 768,
-      "num_layers": 12,
+      "num_layers": 13,
       "num_heads": 12,
       "num_kv_heads": 3,
       "max_position_embeddings": 512,
@@ -29,7 +29,7 @@
     "large": {
       "vocab_size": 32016,
       "hidden_size": 1536,
-      "num_layers": 32,
+      "num_layers": 40,
       "num_heads": 24,
       "num_kv_heads": 6,
       "max_position_embeddings": 512,
@@ -57,8 +57,8 @@
   },
   
   "training": {
-    "batch_size": 32,
-    "gradient_accumulation_steps": 32,
+    "batch_size": 16,
+    "gradient_accumulation_steps": 64,
     "num_epochs": 1,
     "learning_rate": 0.0006,
     "min_learning_rate": 0.0001,
@@ -98,7 +98,7 @@
     "use_gqa": true,
     "use_scaled_residuals": false,
     "use_gradient_checkpointing": false,
-    "use_flash_attention": false,
+    "use_flash_attention": true,
     "tie_embeddings": true
   }
 }

@@ -118,7 +118,7 @@ class Trainer:
         self.global_step = 0
         # max_steps will be calculated dynamically based on dataset size
         self.best_val_loss = float('inf')
-        self.completed_fourths = []  # Track which fourths have been completed
+        self.completed_eighths = []  # Track which eighths have been completed
         self.recent_step_times = deque(maxlen=5)  # Track last 5 step times for ETA calculation
         
         # Get gradient accumulation steps early for correct calculations
@@ -132,39 +132,75 @@ class Trainer:
         # This avoids loading ~13GB into GPU memory just to count batches
         print("Calculating training steps...", end='')
         
-        # Get statistics for first fourth
-        first_fourth_stats = calculate_dataloader_stats(
+        # Get statistics for first eighth
+        first_eighth_stats = calculate_dataloader_stats(
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='first_fourth',
+            file_subset='first_eighth',
             dataset_source=self.dataset_source
         )
         
-        # Get statistics for second fourth
-        second_fourth_stats = calculate_dataloader_stats(
+        # Get statistics for second eighth
+        second_eighth_stats = calculate_dataloader_stats(
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='second_fourth',
+            file_subset='second_eighth',
             dataset_source=self.dataset_source
         )
         
-        # Get statistics for third fourth
-        third_fourth_stats = calculate_dataloader_stats(
+        # Get statistics for third eighth
+        third_eighth_stats = calculate_dataloader_stats(
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='third_fourth',
+            file_subset='third_eighth',
             dataset_source=self.dataset_source
         )
         
-        # Get statistics for fourth fourth
-        fourth_fourth_stats = calculate_dataloader_stats(
+        # Get statistics for fourth eighth
+        fourth_eighth_stats = calculate_dataloader_stats(
             batch_size=self.config['training']['batch_size'],
             val_split=0.1,
             test_mode=self.test_mode,
-            file_subset='fourth_fourth',
+            file_subset='fourth_eighth',
+            dataset_source=self.dataset_source
+        )
+        
+        # Get statistics for fifth eighth
+        fifth_eighth_stats = calculate_dataloader_stats(
+            batch_size=self.config['training']['batch_size'],
+            val_split=0.1,
+            test_mode=self.test_mode,
+            file_subset='fifth_eighth',
+            dataset_source=self.dataset_source
+        )
+        
+        # Get statistics for sixth eighth
+        sixth_eighth_stats = calculate_dataloader_stats(
+            batch_size=self.config['training']['batch_size'],
+            val_split=0.1,
+            test_mode=self.test_mode,
+            file_subset='sixth_eighth',
+            dataset_source=self.dataset_source
+        )
+        
+        # Get statistics for seventh eighth
+        seventh_eighth_stats = calculate_dataloader_stats(
+            batch_size=self.config['training']['batch_size'],
+            val_split=0.1,
+            test_mode=self.test_mode,
+            file_subset='seventh_eighth',
+            dataset_source=self.dataset_source
+        )
+        
+        # Get statistics for eighth eighth
+        eighth_eighth_stats = calculate_dataloader_stats(
+            batch_size=self.config['training']['batch_size'],
+            val_split=0.1,
+            test_mode=self.test_mode,
+            file_subset='eighth_eighth',
             dataset_source=self.dataset_source
         )
         
@@ -172,8 +208,8 @@ class Trainer:
         num_epochs = self.config['training'].get('num_epochs', 1)
         
         if self.train_quarter:
-            # Train on single quarter only - calculate steps for first fourth
-            self.batches_per_epoch = first_fourth_stats['train_batches']
+            # Train on single quarter only - calculate steps for first eighth
+            self.batches_per_epoch = first_eighth_stats['train_batches']
             self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
             if self.batches_per_epoch % self.gradient_accumulation_steps != 0:
                 self.steps_per_epoch += 1
@@ -183,13 +219,17 @@ class Trainer:
             self.total_training_steps = self.max_steps
             
             if not resume_from:
-                print(f"  • Training on first_fourth only: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
+                print(f"  • Training on first_eighth only: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
         else:
-            # Train on all quarters sequentially - sum all four quarters
-            self.batches_per_epoch = (first_fourth_stats['train_batches'] + 
-                                       second_fourth_stats['train_batches'] + 
-                                       third_fourth_stats['train_batches'] + 
-                                       fourth_fourth_stats['train_batches'])
+            # Train on all eighths sequentially - sum all eight eighths
+            self.batches_per_epoch = (first_eighth_stats['train_batches'] + 
+                                       second_eighth_stats['train_batches'] + 
+                                       third_eighth_stats['train_batches'] + 
+                                       fourth_eighth_stats['train_batches'] + 
+                                       fifth_eighth_stats['train_batches'] + 
+                                       sixth_eighth_stats['train_batches'] + 
+                                       seventh_eighth_stats['train_batches'] + 
+                                       eighth_eighth_stats['train_batches'])
             
             # With gradient accumulation, optimizer steps = batches / accumulation_steps
             self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
@@ -202,7 +242,7 @@ class Trainer:
             self.total_training_steps = self.max_steps
             
             if not resume_from:
-                print(f"  • Training on all 4 quarters: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
+                print(f"  • Training on all 8 eighths: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
         
         # Validation frequency: doubled - every 500 steps (or less for test mode)
         if self.test_mode:
@@ -268,11 +308,11 @@ class Trainer:
         
         return model
     
-    def _create_dataloaders(self, file_subset: str = 'first_fourth') -> Tuple[DataLoader, DataLoader, Dict]:
+    def _create_dataloaders(self, file_subset: str = 'first_eighth') -> Tuple[DataLoader, DataLoader, Dict]:
         """Create train and validation data loaders for specified subset.
         
         Args:
-            file_subset: Which files to load ('first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth')
+            file_subset: Which files to load ('first_eighth', 'second_eighth', ..., 'eighth_eighth')
         
         Returns:
             Tuple of (train_loader, val_loader, info_dict)
@@ -287,7 +327,7 @@ class Trainer:
             test_mode=self.test_mode,
             verbose=True,
             seed=42,  # Consistent split across runs
-            file_subset=file_subset,  # Load only specified fourth
+            file_subset=file_subset,  # Load only specified eighth
             dataset_source=self.dataset_source  # Use configured dataset source
         )
         
@@ -314,7 +354,7 @@ class Trainer:
         """Switch to a different data subset, destroying old dataloaders first.
         
         Args:
-            new_subset: Which subset to switch to ('first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth')
+            new_subset: Which subset to switch to ('first_eighth', 'second_eighth', ..., 'eighth_eighth')
         """
         if self.current_data_subset == new_subset:
             print(f"Already using {new_subset}, skipping switch")
@@ -600,7 +640,7 @@ class Trainer:
         checkpoint = {
             'global_step': self.global_step,
             'current_data_subset': self.current_data_subset,  # Save which subset we're on
-            'completed_fourths': self.completed_fourths,  # Save completed fourths list
+            'completed_eighths': self.completed_eighths,  # Save completed eighths list
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
@@ -710,26 +750,26 @@ class Trainer:
         self.global_step = checkpoint['global_step']
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         
-        # Restore completed fourths list
-        self.completed_fourths = checkpoint.get('completed_fourths', [])
+        # Restore completed eighths list (with backward compatibility for old checkpoints)
+        self.completed_eighths = checkpoint.get('completed_eighths', checkpoint.get('completed_fourths', []))
         
         # Clear step times for fresh ETA calculation after resume
         self.recent_step_times.clear()
         
         # Restore data subset state if available
-        saved_subset = checkpoint.get('current_data_subset', 'first_fourth')
+        saved_subset = checkpoint.get('current_data_subset', 'first_eighth')
         
-        # Check if current fourth is already complete and move to next if needed
-        data_fourths = ['first_fourth', 'second_fourth', 'third_fourth', 'fourth_fourth']
-        if saved_subset in self.completed_fourths:
-            current_idx = data_fourths.index(saved_subset)
-            if current_idx < len(data_fourths) - 1:
-                next_subset = data_fourths[current_idx + 1]
+        # Check if current eighth is already complete and move to next if needed
+        data_eighths = ['first_eighth', 'second_eighth', 'third_eighth', 'fourth_eighth', 'fifth_eighth', 'sixth_eighth', 'seventh_eighth', 'eighth_eighth']
+        if saved_subset in self.completed_eighths:
+            current_idx = data_eighths.index(saved_subset)
+            if current_idx < len(data_eighths) - 1:
+                next_subset = data_eighths[current_idx + 1]
                 print(f"  {saved_subset} already complete, moving to {next_subset}")
                 saved_subset = next_subset
             else:
-                print(f"  All fourths completed! Training is finished.")
-                saved_subset = 'fourth_fourth'  # Stay on last fourth
+                print(f"  All eighths completed! Training is finished.")
+                saved_subset = 'eighth_eighth'  # Stay on last eighth
         
         # Recalculate steps dynamically based on train_quarter flag and remaining data
         from dataloader import calculate_dataloader_stats
@@ -739,7 +779,7 @@ class Trainer:
         
         if self.train_quarter:
             # Train on single quarter only
-            current_fourth_stats = calculate_dataloader_stats(
+            current_eighth_stats = calculate_dataloader_stats(
                 batch_size=self.config['training']['batch_size'],
                 val_split=0.1,
                 test_mode=self.test_mode,
@@ -747,32 +787,32 @@ class Trainer:
                 dataset_source=self.dataset_source
             )
             
-            steps_in_current_fourth = current_fourth_stats['train_batches'] // self.gradient_accumulation_steps
-            if current_fourth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
-                steps_in_current_fourth += 1
+            steps_in_current_eighth = current_eighth_stats['train_batches'] // self.gradient_accumulation_steps
+            if current_eighth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
+                steps_in_current_eighth += 1
             
-            # For train_quarter mode, complete the remaining steps of the current fourth
+            # For train_quarter mode, complete the remaining steps of the current eighth
             # accounting for the epochs
-            self.max_steps = steps_in_current_fourth * num_epochs
+            self.max_steps = steps_in_current_eighth * num_epochs
             self.total_training_steps = self.max_steps
         else:
-            # Train on all quarters sequentially
-            # Calculate total steps for ALL fourths (not just remaining)
-            data_fourths = ['first_fourth', 'second_fourth', 'third_fourth', 'fourth_fourth']
+            # Train on all eighths sequentially
+            # Calculate total steps for ALL eighths (not just remaining)
+            data_eighths = ['first_eighth', 'second_eighth', 'third_eighth', 'fourth_eighth', 'fifth_eighth', 'sixth_eighth', 'seventh_eighth', 'eighth_eighth']
             total_steps = 0
             
-            for fourth in data_fourths:
-                fourth_stats = calculate_dataloader_stats(
+            for eighth in data_eighths:
+                eighth_stats = calculate_dataloader_stats(
                     batch_size=self.config['training']['batch_size'],
                     val_split=0.1,
                     test_mode=self.test_mode,
-                    file_subset=fourth,
+                    file_subset=eighth,
                     dataset_source=self.dataset_source
                 )
-                steps_in_fourth = fourth_stats['train_batches'] // self.gradient_accumulation_steps
-                if fourth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
-                    steps_in_fourth += 1
-                total_steps += steps_in_fourth
+                steps_in_eighth = eighth_stats['train_batches'] // self.gradient_accumulation_steps
+                if eighth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
+                    steps_in_eighth += 1
+                total_steps += steps_in_eighth
             
             # Set max_steps for all quarters with epochs
             self.max_steps = total_steps * num_epochs
@@ -781,7 +821,7 @@ class Trainer:
         print(f"  Resumed from step {self.global_step}")
         print(f"  Best validation loss: {self.best_val_loss:.4f}")
         print(f"  Data subset: {saved_subset}")
-        print(f"  Completed fourths: {self.completed_fourths}")
+        print(f"  Completed eighths: {self.completed_eighths}")
         
         # Calculate progress information
         remaining_steps = self.max_steps - self.global_step
@@ -824,34 +864,34 @@ class Trainer:
         iteration_start_time = None  # Track timing across accumulation
         
         # Training loop - continue until max_steps reached
-        data_fourths = ['first_fourth', 'second_fourth', 'third_fourth', 'fourth_fourth']
-        current_fourth_idx = data_fourths.index(self.current_data_subset) if hasattr(self, 'current_data_subset') and self.current_data_subset else 0
+        data_eighths = ['first_eighth', 'second_eighth', 'third_eighth', 'fourth_eighth', 'fifth_eighth', 'sixth_eighth', 'seventh_eighth', 'eighth_eighth']
+        current_eighth_idx = data_eighths.index(self.current_data_subset) if hasattr(self, 'current_data_subset') and self.current_data_subset else 0
         
         try:
             while self.global_step < self.max_steps:
-                # Cycle through data fourths continuously
-                for fourth_idx in range(current_fourth_idx, len(data_fourths)):
-                    data_fourth = data_fourths[fourth_idx]
+                # Cycle through data eighths continuously
+                for eighth_idx in range(current_eighth_idx, len(data_eighths)):
+                    data_eighth = data_eighths[eighth_idx]
                     
-                    # Check if we've reached max_steps before processing new fourth
+                    # Check if we've reached max_steps before processing new eighth
                     if self.global_step >= self.max_steps:
                         break
                     
-                    # Skip already completed fourths
-                    if data_fourth in self.completed_fourths:
-                        print(f"Skipping already completed {data_fourth}")
+                    # Skip already completed eighths
+                    if data_eighth in self.completed_eighths:
+                        print(f"Skipping already completed {data_eighth}")
                         continue
                     
                     # Load the appropriate data subset
-                    if self.current_data_subset != data_fourth:
+                    if self.current_data_subset != data_eighth:
                         if self.train_loader is None:
                             # First time loading data
-                            self._create_dataloaders(data_fourth)
+                            self._create_dataloaders(data_eighth)
                         else:
                             # Switch to new subset
-                            self._switch_data_subset(data_fourth)
+                            self._switch_data_subset(data_eighth)
                     
-                    print(f"\nTraining on {data_fourth} (Step {self.global_step}/{self.max_steps})")
+                    print(f"\nTraining on {data_eighth} (Step {self.global_step}/{self.max_steps})")
                     print(f"{'─'*50}")
                     
                     # Training on current data subset
@@ -920,7 +960,7 @@ class Trainer:
                                 # Calculate average time per step
                                 avg_step_time = sum(self.recent_step_times) / len(self.recent_step_times)
                                 
-                                # Calculate remaining steps for current fourth
+                                # Calculate remaining steps for current eighth
                                 remaining_steps = self.max_steps - self.global_step
                                 
                                 if remaining_steps > 0:
@@ -940,21 +980,25 @@ class Trainer:
                                 else:
                                     eta_str = " | ETA: Complete"
                             
-                            # Map fourth names to fractions for cleaner display
-                            fourth_labels = {
-                                'first_fourth': '1/4',
-                                'second_fourth': '2/4',
-                                'third_fourth': '3/4',
-                                'fourth_fourth': '4/4'
+                            # Map eighth names to fractions for cleaner display
+                            eighth_labels = {
+                                'first_eighth': '1/8',
+                                'second_eighth': '2/8',
+                                'third_eighth': '3/8',
+                                'fourth_eighth': '4/8',
+                                'fifth_eighth': '5/8',
+                                'sixth_eighth': '6/8',
+                                'seventh_eighth': '7/8',
+                                'eighth_eighth': '8/8'
                             }
-                            fourth_label = fourth_labels.get(data_fourth, data_fourth)
+                            eighth_label = eighth_labels.get(data_eighth, data_eighth)
                             
                             # Get current learning rate
                             current_lr = self.optimizer.param_groups[0]['lr']
                             
                             # Print step metrics with data subset indicator, learning rate, and ETA
                             # Time shown is TOTAL time for all gradient accumulation steps
-                            print(f"[{fourth_label:3s}] Step {self.global_step:5d}/{self.total_training_steps} | "
+                            print(f"[{eighth_label:3s}] Step {self.global_step:5d}/{self.total_training_steps} | "
                                   f"{iteration_time * 1000:6.0f}ms | "
                                   f"Loss: {avg_loss:7.4f} | "
                                   f"LR: {current_lr:.2e} | "
@@ -973,7 +1017,7 @@ class Trainer:
                             # validation_interval is already correctly calculated in __init__
                             if self.global_step > 0 and self.global_step % self.validation_interval == 0:
                                 print(f"\n{'='*70}")
-                                print(f"Validation at step {self.global_step} (on {data_fourth})")
+                                print(f"Validation at step {self.global_step} (on {data_eighth})")
                                 print(f"{'='*70}")
                                 
                                 # Run validation on current subset's validation split
@@ -1007,35 +1051,35 @@ class Trainer:
                             accumulated_loss = 0.0
                             accumulated_tokens = 0
                     
-                    # After processing all batches in this fourth, mark it as complete
-                    if data_fourth not in self.completed_fourths:
-                        self.completed_fourths.append(data_fourth)
-                        print(f"\n✓ Completed {data_fourth}")
-                        print(f"Saving checkpoint after completing {data_fourth}...")
-                        self.save_checkpoint(f"checkpoint_{data_fourth}_complete.pt")
+                    # After processing all batches in this eighth, mark it as complete
+                    if data_eighth not in self.completed_eighths:
+                        self.completed_eighths.append(data_eighth)
+                        print(f"\n✓ Completed {data_eighth}")
+                        print(f"Saving checkpoint after completing {data_eighth}...")
+                        self.save_checkpoint(f"checkpoint_{data_eighth}_complete.pt")
                         
-                        # Check if we've completed all fourths
-                        if len(self.completed_fourths) == 4:
-                            print(f"\n🎉 All fourths completed! Training finished.")
+                        # Check if we've completed all eighths
+                        if len(self.completed_eighths) == 8:
+                            print(f"\n🎉 All eighths completed! Training finished.")
                             break
                 
                 # Check if we should continue or stop based on train_quarter flag
                 if self.global_step >= self.max_steps:
                     if self.train_quarter:
-                        print(f"\nCompleted current fourth. Stopping training (--train-quarter mode).")
+                        print(f"\nCompleted current eighth. Stopping training (--train-quarter mode).")
                         break
                     else:
-                        # In full training mode, we've completed all fourths
-                        print(f"\nCompleted all training steps across all fourths.")
+                        # In full training mode, we've completed all eighths
+                        print(f"\nCompleted all training steps across all eighths.")
                         break
                 
-                # Reset to first_fourth for next epoch if not in train_quarter mode
-                if not self.train_quarter and fourth_idx == len(data_fourths) - 1:
-                    # Completed all fourths but haven't reached max_steps
+                # Reset to first_eighth for next epoch if not in train_quarter mode
+                if not self.train_quarter and eighth_idx == len(data_eighths) - 1:
+                    # Completed all eighths but haven't reached max_steps
                     # Reset for another pass through the data
-                    current_fourth_idx = 0
-                    self.completed_fourths = []  # Reset completed fourths for next epoch
-                    print(f"\nStarting new epoch through all fourths...")
+                    current_eighth_idx = 0
+                    self.completed_eighths = []  # Reset completed eighths for next epoch
+                    print(f"\nStarting new epoch through all eighths...")
         
         except KeyboardInterrupt:
             print("\n\nTraining interrupted by user")

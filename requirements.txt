@@ -1,0 +1,11 @@
+orjson
+tqdm
+psutil
+tensorboard
+sacrebleu
+rouge-score
+--index-url https://download.pytorch.org/whl/cu129
+torch==2.8.0+cu129
+torchvision==0.23.0+cu129
+torchaudio==2.8.0+cu129
+numpy>=1.24.0,<2.0.0

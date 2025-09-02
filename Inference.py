@@ -31,40 +31,54 @@ class Colors:
     UNDERLINE = '\033[4m'
 
 
-def print_header(text: str):
-    """Print formatted header."""
-    print(f"\n{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
-    print(f"{Colors.HEADER}{Colors.BOLD}{text.center(60)}{Colors.ENDC}")
-    print(f"{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}\n")
-
-
-def print_info(text: str):
-    """Print info message in cyan."""
-    print(f"{Colors.CYAN}ℹ {text}{Colors.ENDC}")
-
-
-def print_success(text: str):
-    """Print success message in green."""
-    print(f"{Colors.GREEN}✓ {text}{Colors.ENDC}")
-
-
-def print_warning(text: str):
-    """Print warning message in yellow."""
-    print(f"{Colors.WARNING}⚠ {text}{Colors.ENDC}")
-
-
-def print_error(text: str):
-    """Print error message in red."""
-    print(f"{Colors.RED}✗ {text}{Colors.ENDC}")
+def print_message(text: str, style: str = "info", symbol: Optional[str] = None):
+    """Unified print function for all message types.
+    
+    Args:
+        text: Message text to print
+        style: Style of message ('header', 'info', 'success', 'warning', 'error', 'cyan', 'blue')
+        symbol: Optional symbol to prefix the message (auto-selected if None)
+    """
+    style_config = {
+        'header': {'color': Colors.HEADER, 'symbol': '', 'bold': True, 'is_header': True},
+        'info': {'color': Colors.CYAN, 'symbol': 'ℹ', 'bold': False, 'is_header': False},
+        'success': {'color': Colors.GREEN, 'symbol': '✓', 'bold': False, 'is_header': False},
+        'warning': {'color': Colors.WARNING, 'symbol': '⚠', 'bold': False, 'is_header': False},
+        'error': {'color': Colors.RED, 'symbol': '✗', 'bold': False, 'is_header': False},
+        'cyan': {'color': Colors.CYAN, 'symbol': '', 'bold': False, 'is_header': False},
+        'blue': {'color': Colors.BLUE, 'symbol': '', 'bold': False, 'is_header': False}
+    }
+    
+    config = style_config.get(style, style_config['info'])
+    color = config['color']
+    default_symbol = config['symbol']
+    use_bold = config['bold']
+    is_header = config['is_header']
+    
+    # Use provided symbol or default for the style
+    display_symbol = symbol if symbol is not None else default_symbol
+    
+    if is_header:
+        # Special formatting for headers
+        print(f"\n{color}{Colors.BOLD if use_bold else ''}{'=' * 60}{Colors.ENDC}")
+        print(f"{color}{Colors.BOLD if use_bold else ''}{text.center(60)}{Colors.ENDC}")
+        print(f"{color}{Colors.BOLD if use_bold else ''}{'=' * 60}{Colors.ENDC}\n")
+    else:
+        # Regular message formatting
+        prefix = f"{display_symbol} " if display_symbol else ""
+        bold_start = Colors.BOLD if use_bold else ""
+        print(f"{color}{bold_start}{prefix}{text}{Colors.ENDC}")
 
 
 def format_file_size(size_bytes: int) -> str:
     """Format file size in human-readable format."""
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.2f} TB"
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    size = float(size_bytes)
+    unit_idx = 0
+    while size >= 1024 and unit_idx < len(units) - 1:
+        size /= 1024
+        unit_idx += 1
+    return f"{size:.2f} {units[unit_idx]}"
 
 
 def list_run_directories(base_checkpoint_dir: Path) -> List[Tuple[str, Path]]:
@@ -112,360 +126,389 @@ def list_checkpoints(checkpoint_dir: Path) -> List[Tuple[str, Path]]:
     return checkpoints
 
 
-def select_run_directory(base_checkpoint_dir: Path) -> Optional[Path]:
-    """Interactive run directory selection.
+def select_items_interactive(
+    items: List[Tuple[str, any]],
+    title: str,
+    allow_multiple: bool = False,
+    allow_all: bool = False,
+    allow_skip: bool = False,
+    special_highlights: Optional[Dict[str, str]] = None
+) -> Optional[Union[any, List[any]]]:
+    """Generic interactive item selection function.
+    
+    Args:
+        items: List of (display_name, value) tuples
+        title: Title to display
+        allow_multiple: Allow selecting multiple items
+        allow_all: Show 'all' option for selecting all items
+        allow_skip: Show 'skip' option (only valid in multiple mode)
+        special_highlights: Dict mapping keywords to highlight colors (e.g., {'best': 'GREEN'})
     
     Returns:
-        Selected run directory path or None if cancelled
+        Selected value(s) or None if cancelled
     """
-    run_dirs = list_run_directories(base_checkpoint_dir)
-    
-    if not run_dirs:
-        # No subdirectories, check if there are checkpoints in the base directory (old format)
-        if any(base_checkpoint_dir.glob("*.pt")):
-            print_warning("Found checkpoints in old flat structure. Using base directory.")
-            return base_checkpoint_dir
-        print_error(f"No training runs found in {base_checkpoint_dir}")
+    if not items:
+        print_message(f"No items available for selection", "error")
         return None
     
-    print(f"{Colors.BOLD}Available Training Runs:{Colors.ENDC}")
+    # Display header
+    print(f"{Colors.BOLD}{title}{Colors.ENDC}")
     print("-" * 70)
     
-    for idx, (display_name, _) in enumerate(run_dirs, 1):
-        if idx == 1:  # Highlight most recent
-            print(f"  {Colors.GREEN}{idx:2d}. {display_name} (most recent){Colors.ENDC}")
-        else:
-            print(f"  {idx:2d}. {display_name}")
-    
-    print("-" * 70)
-    print(f"  {Colors.WARNING}0. Cancel{Colors.ENDC}")
-    
-    while True:
-        try:
-            choice = input(f"\n{Colors.BOLD}Select training run (0-{len(run_dirs)}): {Colors.ENDC}")
-            choice_idx = int(choice)
-            
-            if choice_idx == 0:
-                return None
-            elif 1 <= choice_idx <= len(run_dirs):
-                _, selected_path = run_dirs[choice_idx - 1]
-                print_success(f"Selected run: {selected_path.name}")
-                return selected_path
-            else:
-                print_warning(f"Please enter a number between 0 and {len(run_dirs)}")
-        except (ValueError, KeyboardInterrupt):
-            print_warning("Invalid input. Please enter a number.")
-
-
-def select_checkpoint(checkpoint_dir: Path) -> Optional[Path]:
-    """Interactive checkpoint selection.
-    
-    Returns:
-        Selected checkpoint path or None if cancelled
-    """
-    checkpoints = list_checkpoints(checkpoint_dir)
-    
-    if not checkpoints:
-        print_error(f"No checkpoints found in {checkpoint_dir}")
-        return None
-    
-    print(f"{Colors.BOLD}Available Checkpoints:{Colors.ENDC}")
-    print("-" * 70)
-    
-    for idx, (display_name, _) in enumerate(checkpoints, 1):
-        # Highlight special checkpoints
-        if "best" in display_name:
-            print(f"  {Colors.GREEN}{idx:2d}. {display_name}{Colors.ENDC}")
-        elif "latest" in display_name:
-            print(f"  {Colors.BLUE}{idx:2d}. {display_name}{Colors.ENDC}")
-        else:
-            print(f"  {idx:2d}. {display_name}")
-    
-    print("-" * 70)
-    print(f"  {Colors.WARNING}0. Cancel{Colors.ENDC}")
-    
-    while True:
-        try:
-            choice = input(f"\n{Colors.BOLD}Select checkpoint (0-{len(checkpoints)}): {Colors.ENDC}")
-            choice_idx = int(choice)
-            
-            if choice_idx == 0:
-                return None
-            elif 1 <= choice_idx <= len(checkpoints):
-                _, selected_path = checkpoints[choice_idx - 1]
-                print_success(f"Selected: {selected_path.name}")
-                return selected_path
-            else:
-                print_warning(f"Please enter a number between 0 and {len(checkpoints)}")
-        except (ValueError, KeyboardInterrupt):
-            print_warning("Invalid input. Please enter a number.")
-
-
-def select_multiple_checkpoints(checkpoint_dir: Path) -> Optional[List[Path]]:
-    """Interactive multi-checkpoint selection.
-    
-    Returns:
-        List of selected checkpoint paths or None if cancelled
-    """
-    checkpoints = list_checkpoints(checkpoint_dir)
-    
-    if not checkpoints:
-        print_error(f"No checkpoints found in {checkpoint_dir}")
-        return None
-    
-    print(f"{Colors.BOLD}Available Checkpoints for Multi-Model Comparison:{Colors.ENDC}")
-    print("-" * 70)
-    
-    # Display all checkpoints with indices
-    for idx, (display_name, _) in enumerate(checkpoints, 1):
-        if "best" in display_name:
-            print(f"  {idx:2d}. {display_name} {Colors.GREEN}(best){Colors.ENDC}")
-        elif "latest" in display_name:
-            print(f"  {idx:2d}. {display_name} {Colors.BLUE}(latest){Colors.ENDC}")
-        else:
-            print(f"  {idx:2d}. {display_name}")
-    
-    print("-" * 70)
-    print(f"{Colors.CYAN}Enter checkpoint numbers separated by commas (e.g., 1,3,5){Colors.ENDC}")
-    print(f"{Colors.CYAN}Or enter 'all' to select all checkpoints{Colors.ENDC}")
-    print(f"{Colors.WARNING}Enter 0 to cancel{Colors.ENDC}")
-    
-    while True:
-        try:
-            choice = input(f"\n{Colors.BOLD}Select checkpoints: {Colors.ENDC}").strip()
-            
-            if choice == '0':
-                return None
-            
-            if choice.lower() == 'all':
-                selected_paths = [path for _, path in checkpoints]
-                print_success(f"Selected all {len(selected_paths)} checkpoints")
-                return selected_paths
-            
-            # Parse comma-separated numbers
-            try:
-                indices = [int(x.strip()) for x in choice.split(',')]
-                selected_paths = []
-                selected_names = []
-                
-                for idx in indices:
-                    if 1 <= idx <= len(checkpoints):
-                        name, path = checkpoints[idx - 1]
-                        selected_paths.append(path)
-                        selected_names.append(path.name)
+    # Display items with highlighting
+    for idx, (display_name, _) in enumerate(items, 1):
+        if special_highlights:
+            for keyword, color_name in special_highlights.items():
+                if keyword in display_name.lower():
+                    color = getattr(Colors, color_name, Colors.ENDC)
+                    if keyword == 'most recent' and idx == 1:
+                        print(f"  {color}{idx:2d}. {display_name} (most recent){Colors.ENDC}")
                     else:
-                        print_warning(f"Invalid index {idx}, skipping...")
-                
-                if selected_paths:
-                    print_success(f"Selected {len(selected_paths)} checkpoints:")
-                    for name in selected_names:
-                        print(f"  • {name}")
-                    return selected_paths
-                else:
-                    print_warning("No valid checkpoints selected. Please try again.")
-                    
-            except ValueError:
-                print_warning("Invalid input. Please enter numbers separated by commas, 'all', or 0 to cancel.")
-                
-        except KeyboardInterrupt:
-            print_warning("\nSelection cancelled")
-            return None
-
-
-def select_checkpoints_from_multiple_runs(base_checkpoint_dir: Path) -> Optional[List[Tuple[Path, Path]]]:
-    """Interactive checkpoint selection from multiple training runs.
-    
-    Returns:
-        List of (run_dir, checkpoint_path) tuples or None if cancelled
-    """
-    run_dirs = list_run_directories(base_checkpoint_dir)
-    
-    # Check for flat structure (backward compatibility)
-    if not run_dirs:
-        if any(base_checkpoint_dir.glob("*.pt")):
-            print_warning("Found checkpoints in old flat structure. Using base directory.")
-            checkpoints = select_multiple_checkpoints(base_checkpoint_dir)
-            if checkpoints:
-                return [(base_checkpoint_dir, cp) for cp in checkpoints]
-            return None
-        print_error(f"No training runs found in {base_checkpoint_dir}")
-        return None
-    
-    # Step 1: Select training runs
-    print(f"{Colors.BOLD}Step 1: Select Training Runs{Colors.ENDC}")
-    print("-" * 70)
-    
-    for idx, (display_name, _) in enumerate(run_dirs, 1):
-        if idx == 1:
-            print(f"  {Colors.GREEN}{idx:2d}. {display_name} (most recent){Colors.ENDC}")
-        else:
-            print(f"  {idx:2d}. {display_name}")
-    
-    print("-" * 70)
-    print(f"{Colors.CYAN}Enter run numbers separated by commas (e.g., 1,3,5){Colors.ENDC}")
-    print(f"{Colors.CYAN}Or enter 'all' to select all runs{Colors.ENDC}")
-    print(f"{Colors.WARNING}Enter 0 to cancel{Colors.ENDC}")
-    
-    selected_runs = []
-    while True:
-        try:
-            choice = input(f"\n{Colors.BOLD}Select runs: {Colors.ENDC}").strip()
-            
-            if choice == '0':
-                return None
-            
-            if choice.lower() == 'all':
-                selected_runs = run_dirs
-                print_success(f"Selected all {len(selected_runs)} runs")
-                break
-            
-            # Parse comma-separated numbers
-            try:
-                indices = [int(x.strip()) for x in choice.split(',')]
-                
-                for idx in indices:
-                    if 1 <= idx <= len(run_dirs):
-                        selected_runs.append(run_dirs[idx - 1])
-                    else:
-                        print_warning(f"Invalid index {idx}, skipping...")
-                
-                if selected_runs:
-                    print_success(f"Selected {len(selected_runs)} runs:")
-                    for name, _ in selected_runs:
-                        print(f"  • {name.split()[0]}")
+                        print(f"  {color}{idx:2d}. {display_name}{Colors.ENDC}")
                     break
-                else:
-                    print_warning("No valid runs selected. Please try again.")
-                    
-            except ValueError:
-                print_warning("Invalid input. Please enter numbers separated by commas, 'all', or 0 to cancel.")
-                
-        except KeyboardInterrupt:
-            print_warning("\nSelection cancelled")
-            return None
-    
-    # Step 2: Select checkpoints from each run
-    all_selected_checkpoints = []
-    
-    for run_idx, (run_name, run_path) in enumerate(selected_runs, 1):
-        print(f"\n{Colors.BOLD}Step 2.{run_idx}: Select Checkpoints from {run_path.name}{Colors.ENDC}")
-        
-        checkpoints = list_checkpoints(run_path)
-        if not checkpoints:
-            print_warning(f"No checkpoints found in {run_path.name}, skipping...")
-            continue
-        
-        print("-" * 70)
-        for idx, (display_name, _) in enumerate(checkpoints, 1):
-            if "best" in display_name:
-                print(f"  {idx:2d}. {display_name} {Colors.GREEN}(best){Colors.ENDC}")
-            elif "latest" in display_name:
-                print(f"  {idx:2d}. {display_name} {Colors.BLUE}(latest){Colors.ENDC}")
             else:
                 print(f"  {idx:2d}. {display_name}")
-        
-        print("-" * 70)
-        print(f"{Colors.CYAN}Enter checkpoint numbers for this run (e.g., 1,3){Colors.ENDC}")
-        print(f"{Colors.CYAN}Or 'all' for all checkpoints, 'skip' to skip this run{Colors.ENDC}")
-        
-        while True:
-            try:
-                choice = input(f"{Colors.BOLD}Select checkpoints: {Colors.ENDC}").strip()
+        else:
+            print(f"  {idx:2d}. {display_name}")
+    
+    print("-" * 70)
+    
+    # Display options
+    if allow_multiple:
+        print(f"{Colors.CYAN}Enter numbers separated by commas (e.g., 1,3,5){Colors.ENDC}")
+        if allow_all:
+            print(f"{Colors.CYAN}Or enter 'all' to select all items{Colors.ENDC}")
+        if allow_skip:
+            print(f"{Colors.CYAN}Or enter 'skip' to skip this selection{Colors.ENDC}")
+    print(f"{Colors.WARNING}Enter 0 to cancel{Colors.ENDC}")
+    
+    # Get user input
+    while True:
+        try:
+            if allow_multiple:
+                prompt = f"\n{Colors.BOLD}Select items: {Colors.ENDC}"
+            else:
+                prompt = f"\n{Colors.BOLD}Select item (0-{len(items)}): {Colors.ENDC}"
+            
+            choice = input(prompt).strip()
+            
+            # Handle cancel
+            if choice == '0':
+                return None
+            
+            # Handle special options for multiple selection
+            if allow_multiple:
+                if allow_skip and choice.lower() == 'skip':
+                    return 'skip'  # Special return value for skip
                 
-                if choice.lower() == 'skip':
-                    print_info(f"Skipping {run_path.name}")
-                    break
-                
-                if choice.lower() == 'all':
-                    for _, checkpoint_path in checkpoints:
-                        all_selected_checkpoints.append((run_path, checkpoint_path))
-                    print_success(f"Selected all {len(checkpoints)} checkpoints from {run_path.name}")
-                    break
+                if allow_all and choice.lower() == 'all':
+                    selected_values = [value for _, value in items]
+                    print_message(f"Selected all {len(selected_values)} items", "success")
+                    return selected_values
                 
                 # Parse comma-separated numbers
                 try:
                     indices = [int(x.strip()) for x in choice.split(',') if x.strip()]
-                    selected_count = 0
+                    selected_values = []
+                    selected_names = []
                     
                     for idx in indices:
-                        if 1 <= idx <= len(checkpoints):
-                            _, checkpoint_path = checkpoints[idx - 1]
-                            all_selected_checkpoints.append((run_path, checkpoint_path))
-                            selected_count += 1
+                        if 1 <= idx <= len(items):
+                            name, value = items[idx - 1]
+                            selected_values.append(value)
+                            selected_names.append(name.split()[0] if len(name.split()) > 0 else name)
                         else:
-                            print_warning(f"Invalid index {idx}, skipping...")
+                            print_message(f"Invalid index {idx}, skipping...", "warning")
                     
-                    if selected_count > 0:
-                        print_success(f"Selected {selected_count} checkpoints from {run_path.name}")
-                        break
+                    if selected_values:
+                        print_message(f"Selected {len(selected_values)} items", "success")
+                        for name in selected_names:
+                            print(f"  • {name}")
+                        return selected_values
                     else:
-                        print_warning("No valid checkpoints selected. Try again or type 'skip'.")
+                        print_message("No valid items selected. Please try again.", "warning")
                         
                 except ValueError:
-                    print_warning("Invalid input. Enter numbers, 'all', or 'skip'.")
+                    if allow_skip:
+                        print_message("Invalid input. Enter numbers, 'all', 'skip', or 0 to cancel.", "warning")
+                    else:
+                        print_message("Invalid input. Enter numbers, 'all', or 0 to cancel.", "warning")
+            
+            else:
+                # Single selection mode
+                try:
+                    choice_idx = int(choice)
+                    if 1 <= choice_idx <= len(items):
+                        name, value = items[choice_idx - 1]
+                        print_message(f"Selected: {name.split()[0] if len(name.split()) > 0 else name}", "success")
+                        return value
+                    else:
+                        print_message(f"Please enter a number between 0 and {len(items)}", "warning")
+                except ValueError:
+                    print_message("Invalid input. Please enter a number.", "warning")
                     
-            except KeyboardInterrupt:
-                print_warning("\nSelection cancelled")
-                return None
+        except KeyboardInterrupt:
+            print_message("\nSelection cancelled", "warning")
+            return None
+
+
+def select_checkpoints_unified(base_checkpoint_dir: Path, allow_multiple: bool = False) -> Optional[Union[Path, List[Tuple[Path, Path]]]]:
+    """Unified checkpoint selection for single or multiple models.
     
-    if all_selected_checkpoints:
-        print(f"\n{Colors.GREEN}{'=' * 70}{Colors.ENDC}")
-        print_success(f"Total selected: {len(all_selected_checkpoints)} checkpoints from {len(selected_runs)} runs")
-        print(f"{Colors.GREEN}{'=' * 70}{Colors.ENDC}")
-        return all_selected_checkpoints
-    else:
-        print_warning("No checkpoints selected from any run.")
+    Returns:
+        For single: checkpoint path
+        For multiple: list of (run_dir, checkpoint_path) tuples
+    """
+    run_dirs = list_run_directories(base_checkpoint_dir)
+    
+    # Handle flat structure (backward compatibility)
+    if not run_dirs:
+        if any(base_checkpoint_dir.glob("*.pt")):
+            print_message("Found checkpoints in old flat structure.", "warning")
+            checkpoints = list_checkpoints(base_checkpoint_dir)
+            if not checkpoints:
+                print_message("No checkpoints found.", "error")
+                return None
+            
+            result = select_items_interactive(
+                checkpoints,
+                "Available Checkpoints:",
+                allow_multiple=allow_multiple,
+                allow_all=allow_multiple,
+                special_highlights={'best': 'GREEN', 'latest': 'BLUE'}
+            )
+            
+            if result is None:
+                return None
+            
+            if allow_multiple:
+                return [(base_checkpoint_dir, cp) for cp in result]
+            else:
+                return result
+        else:
+            print_message(f"No training runs found in {base_checkpoint_dir}", "error")
+            return None
+    
+    # Single model selection
+    if not allow_multiple:
+        run_dir = select_items_interactive(
+            run_dirs,
+            "Available Training Runs:",
+            special_highlights={'most recent': 'GREEN'}
+        )
+        if run_dir is None:
+            return None
+        
+        checkpoints = list_checkpoints(run_dir)
+        if not checkpoints:
+            print_message(f"No checkpoints found in {run_dir}", "error")
+            return None
+        
+        return select_items_interactive(
+            checkpoints,
+            "Available Checkpoints:",
+            special_highlights={'best': 'GREEN', 'latest': 'BLUE'}
+        )
+    
+    # Multi-model selection
+    print(f"{Colors.BOLD}Step 1: Select Training Runs{Colors.ENDC}")
+    selected_runs = select_items_interactive(
+        run_dirs,
+        "Select Training Runs:",
+        allow_multiple=True,
+        allow_all=True,
+        special_highlights={'most recent': 'GREEN'}
+    )
+    
+    if not selected_runs:
         return None
+    
+    all_selected = []
+    for run_idx, run_path in enumerate(selected_runs, 1):
+        print(f"\n{Colors.BOLD}Step 2.{run_idx}: Select from {run_path.name}{Colors.ENDC}")
+        
+        checkpoints = list_checkpoints(run_path)
+        if not checkpoints:
+            print_message(f"No checkpoints in {run_path.name}", "warning")
+            continue
+        
+        selected = select_items_interactive(
+            checkpoints,
+            f"Checkpoints in {run_path.name}:",
+            allow_multiple=True,
+            allow_all=True,
+            allow_skip=True,
+            special_highlights={'best': 'GREEN', 'latest': 'BLUE'}
+        )
+        
+        if selected == 'skip':
+            continue
+        elif selected:
+            for cp in selected:
+                all_selected.append((run_path, cp))
+    
+    if all_selected:
+        print_message(f"\nTotal selected: {len(all_selected)} checkpoints", "success")
+        return all_selected
+    
+    return None
 
 
-def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tuple[TransformerLM, WikipediaTokenizer]:
+def check_memory_constraints(num_models: int, device: torch.device, model_type: str = "inference") -> bool:
+    """Check memory constraints and warn user if needed.
+    
+    Args:
+        num_models: Number of models to load
+        device: Device to load models on
+        model_type: Type of operation ("inference", "benchmark", etc.)
+    
+    Returns:
+        True if user wants to continue, False otherwise
+    """
+    estimated_memory_per_model = 0.1  # ~100MB per model
+    estimated_total_memory = num_models * estimated_memory_per_model
+    
+    if device.type == 'cuda':
+        available_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+        if estimated_total_memory > available_memory * 0.8:
+            print_message(f"Selected {num_models} models (~{estimated_total_memory:.1f}GB)", "warning")
+            print_message(f"Available GPU memory: {available_memory:.1f}GB", "warning")
+            print_message("This may exceed available memory!", "warning")
+            confirm = input(f"\n{Colors.BOLD}Continue anyway? (y/n): {Colors.ENDC}")
+            return confirm.lower() == 'y'
+    else:
+        # Different thresholds for different operations
+        cpu_threshold = 3 if model_type == "benchmark" else 5
+        if num_models > cpu_threshold:
+            print_message(f"Loading {num_models} models on CPU for {model_type} may be slow.", "warning")
+            confirm = input(f"\n{Colors.BOLD}Continue? (y/n): {Colors.ENDC}")
+            return confirm.lower() == 'y'
+    
+    return True  # No memory constraints
+
+
+def create_model_metadata(model: TransformerLM, run_name: str, checkpoint_path: Path, memory_bytes: float) -> Dict:
+    """Create standardized metadata for a model."""
+    return {
+        'run': run_name,
+        'checkpoint': checkpoint_path.name,
+        'params': sum(p.numel() for p in model.parameters()),
+        'memory_mb': memory_bytes / 1e6
+    }
+
+def load_models_for_inference(base_checkpoint_dir: Path, device: torch.device, multi_model: bool = False, compile_model: bool = True) -> Optional[Tuple[Dict, Optional[Dict]]]:
+    """Load model(s) for inference.
+    
+    Args:
+        base_checkpoint_dir: Base directory for checkpoints
+        device: Device to load models on
+        multi_model: Whether to load multiple models
+        compile_model: Whether to compile models with torch.compile() (default: True)
+    
+    Returns:
+        Tuple of (models_dict, metadata) or None if cancelled
+    """
+    # Select checkpoints
+    selection = select_checkpoints_unified(base_checkpoint_dir, allow_multiple=multi_model)
+    if selection is None:
+        return None
+    
+    if not multi_model:
+        # Single model - selection is a Path
+        checkpoint_path = selection
+        print(f"\n{Colors.BOLD}Loading Model and Tokenizer...{Colors.ENDC}")
+        try:
+            model, tokenizer = load_model_and_tokenizer(checkpoint_path, device, compile_model)
+            models_dict = {checkpoint_path.name: (model, tokenizer)}
+            memory_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+            run_name = checkpoint_path.parent.name if checkpoint_path.parent != base_checkpoint_dir else "base"
+            metadata = {
+                checkpoint_path.name: create_model_metadata(model, run_name, checkpoint_path, memory_bytes)
+            }
+            print_message("Model and tokenizer loaded successfully!", "success")
+            return models_dict, metadata
+        except Exception as e:
+            print_message(f"Failed to load model: {e}", "error")
+            return None
+    else:
+        # Multi-model - selection is a list of (run_dir, checkpoint_path) tuples
+        checkpoint_info = selection
+        if not check_memory_constraints(len(checkpoint_info), device, "inference"):
+            return None
+        
+        print(f"\n{Colors.BOLD}Loading Multiple Models...{Colors.ENDC}")
+        try:
+            models_dict, metadata, _ = load_multiple_models(checkpoint_info, device, compile_model)
+            if models_dict:
+                print_message(f"Successfully loaded {len(models_dict)} models!", "success")
+                return models_dict, metadata
+            return None
+        except Exception as e:
+            print_message(f"Failed to load models: {e}", "error")
+            return None
+
+
+def _load_tokenizer() -> WikipediaTokenizer:
+    """Load or download the CodeLlama tokenizer.
+    
+    Returns:
+        Loaded WikipediaTokenizer instance
+    """
+    print_message("Loading tokenizer...", "info")
+    tokenizer = WikipediaTokenizer()
+    tokenizer_path = Path("tokenizers/codellama_tokenizer")
+    
+    if tokenizer_path.exists():
+        try:
+            tokenizer.load(str(tokenizer_path))
+            print_message(f"CodeLlama tokenizer loaded from {tokenizer_path}", "success")
+        except Exception as e:
+            print_message(f"Failed to load tokenizer from {tokenizer_path}: {e}", "error")
+            sys.exit(1)
+    else:
+        print_message("CodeLlama tokenizer not found locally. Downloading from HuggingFace...", "info")
+        tokenizer.train()  # Downloads the pre-trained tokenizer
+        tokenizer.save(str(tokenizer_path))
+        print_message(f"CodeLlama tokenizer downloaded and saved to {tokenizer_path}", "success")
+    
+    return tokenizer
+
+
+def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device, compile_model: bool = True) -> Tuple[TransformerLM, WikipediaTokenizer]:
     """Load model from checkpoint and tokenizer.
+    
+    Args:
+        checkpoint_path: Path to checkpoint file
+        device: Device to load model on
+        compile_model: Whether to compile the model with torch.compile() (default: True)
     
     Returns:
         Tuple of (model, tokenizer)
     """
     # Load checkpoint first to get the config
-    print_info(f"Loading checkpoint: {checkpoint_path.name}...")
     # Note: weights_only=False is safe here since we're loading our own trained checkpoints
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    # Get config from checkpoint, fallback to file if not present (for old checkpoints)
-    if 'config' in checkpoint:
-        print_info("Loading configuration from checkpoint...")
-        config = checkpoint['config']
-    else:
-        print_warning("Config not found in checkpoint, loading from config.json")
-        print_warning("This checkpoint may be from an older version")
+    # Get config from checkpoint, fallback to file if not present
+    config = checkpoint.get('config')
+    if not config:
         with open("config.json", 'r') as f:
             config = json.load(f)
     
-    # Create model using config from checkpoint
-    print_info("Creating model architecture from checkpoint config...")
     
-    # Handle both old single-model and new multi-model config formats
+    # Extract model configuration
     if 'models' in config:
-        # New multi-model format
-        model_size = checkpoint.get('model_size', None)
+        model_size = checkpoint.get('model_size')
         if not model_size:
-            # If checkpoint doesn't have model_size, prompt user
             available_sizes = list(config['models'].keys())
-            print_warning("Checkpoint doesn't specify model size.")
-            print(f"Available sizes: {', '.join(available_sizes)}")
-            
-            while True:
-                model_size = input(f"Select model size ({'/'.join(available_sizes)}): ").strip()
-                if model_size in available_sizes:
-                    break
-                print_error(f"Invalid choice. Please enter one of: {', '.join(available_sizes)}")
-        
-        print_info(f"Using '{model_size}' model configuration")
+            model_size = available_sizes[0]  # Use first available size
         model_config = config['models'][model_size]
     else:
-        # Old single-model format (backward compatibility)
         model_config = config['model']
     
     tokenizer_config = config.get('tokenizer', {})
     rope_config = config.get('rope', {})
+    architecture_features = config.get('architecture_features', {})
     
     # Extract actual intermediate_size from the checkpoint's state_dict
     state_dict = checkpoint['model_state_dict']
@@ -474,20 +517,33 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
     
     # Check for FFN layer dimensions to determine actual intermediate_size
     for key in state_dict.keys():
-        if 'ffn.w_gate.weight' in key:
-            # Shape is [intermediate_size, hidden_size]
+        if 'ffn.w_fused.weight' in key:
+            # w_fused contains both gate and up projections
+            intermediate_size = state_dict[key].shape[0] // 2
+            break
+        elif 'ffn.w_gate.weight' in key:
+            # Old format: shape is [intermediate_size, hidden_size]
             intermediate_size = state_dict[key].shape[0]
-            print_info(f"Detected FFN intermediate size: {intermediate_size}")
             break
     
-    # Check if residual scaling parameters exist in checkpoint
-    has_residual_scaling = any('residual_scale' in key for key in state_dict.keys())
-    if has_residual_scaling:
-        use_scaled_residuals = True
-        print_info("Detected residual scaling in checkpoint")
-    else:
-        use_scaled_residuals = False
-        print_info("No residual scaling in checkpoint (older model)")
+    # Check for residual scaling in checkpoint
+    use_scaled_residuals = any('residual_scale' in key for key in state_dict.keys())
+    
+    # Read Flash Attention setting from checkpoint config (required)
+    if 'use_flash_attention' not in architecture_features:
+        raise ValueError(
+            f"Missing 'use_flash_attention' in checkpoint's architecture_features. "
+            f"Available features: {list(architecture_features.keys())}"
+        )
+    
+    use_flash_attention_inference = architecture_features['use_flash_attention']
+    
+    # Disable KV caching when Flash Attention is enabled (they're mutually exclusive)
+    use_kv_cache = not use_flash_attention_inference
+    
+    # Log the settings being used
+    print(f"  Flash Attention: {'✓ Enabled' if use_flash_attention_inference else '✗ Disabled'}")
+    print(f"  KV Caching: {'✓ Enabled' if use_kv_cache else '✗ Disabled (Flash Attention active)'}")
     
     # Create model with all architecture parameters from config
     model = TransformerLM(
@@ -505,12 +561,17 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
         rope_scaling=rope_config.get('scaling_factor', 1.0),
         # Use detected residual scaling setting
         use_scaled_residuals=use_scaled_residuals,
+        # Architecture features from config - CRITICAL for correct model reconstruction
+        use_gqa=architecture_features.get('use_gqa', True),
+        use_flash_attention=use_flash_attention_inference,  # Use inference-specific setting
+        tie_embeddings=architecture_features.get('tie_embeddings', True),
+        use_gradient_checkpointing=architecture_features.get('use_gradient_checkpointing', False),
         # Disable dropout for inference
         dropout=0.0,
         attention_dropout=0.0,
         layer_norm_eps=model_config['layer_norm_eps'],
         initializer_range=model_config['initializer_range'],
-        use_cache=model_config['use_cache'],
+        use_cache=use_kv_cache,  # Disabled when Flash Attention is active
         pad_token_id=tokenizer_config.get('pad_token_id', 2)  # Same as EOS token (CodeLlama convention)
     )
     
@@ -522,46 +583,41 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device) -> Tup
         else:
             new_state_dict[k] = v
     
-    model.load_state_dict(new_state_dict)
+    # Load state dict and validate
+    try:
+        model.load_state_dict(new_state_dict, strict=True)
+    except RuntimeError as e:
+        if "size mismatch" in str(e):
+            raise RuntimeError(f"Model architecture doesn't match checkpoint: {e}")
+        else:
+            raise e
+    
     model = model.to(device)
     model.eval()
     
+    # Conditionally compile model based on parameter
+    if compile_model:
+        print("  Compiling model with torch.compile()...")
+        model = torch.compile(model)
+        print("  Model compiled successfully")
+    else:
+        print("  Compilation: ✗ Disabled (benchmark mode - avoids Flash Attention issues)")
+    
     # Get model stats
     total_params = sum(p.numel() for p in model.parameters())
-    print_success(f"Model loaded: {total_params:,} parameters")
+    print_message(f"Model loaded: {total_params:,} parameters", "success")
     
-    # Display checkpoint info
-    if 'global_step' in checkpoint:
-        print_info(f"Training step: {checkpoint['global_step']:,}")
-    if 'best_val_loss' in checkpoint:
-        print_info(f"Best validation loss: {checkpoint['best_val_loss']:.4f}")
     
-    # Load tokenizer
-    print_info("Loading tokenizer...")
-    tokenizer = WikipediaTokenizer()
-    
-    # Load CodeLlama tokenizer
-    tokenizer_path = Path("tokenizers/codellama_tokenizer")
-    
-    if tokenizer_path.exists():
-        try:
-            tokenizer.load(str(tokenizer_path))
-            print_success(f"CodeLlama tokenizer loaded from {tokenizer_path}")
-        except Exception as e:
-            print_error(f"Failed to load tokenizer from {tokenizer_path}: {e}")
-            sys.exit(1)
-    else:
-        print_info("CodeLlama tokenizer not found locally. Downloading from HuggingFace...")
-        tokenizer.train()  # Downloads the pre-trained tokenizer
-        tokenizer.save(str(tokenizer_path))
-        print_success(f"CodeLlama tokenizer downloaded and saved to {tokenizer_path}")
+    # Load tokenizer (shared across all models)
+    tokenizer = _load_tokenizer()
     
     return model, tokenizer
 
 
 def load_multiple_models(
     checkpoint_info: Union[List[Path], List[Tuple[Path, Path]]], 
-    device: torch.device
+    device: torch.device,
+    compile_model: bool = True
 ) -> Tuple[Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], Dict[str, Dict], float]:
     """Load multiple models from checkpoints.
     
@@ -569,11 +625,10 @@ def load_multiple_models(
         checkpoint_info: Either a list of checkpoint paths (old format)
                         or a list of (run_dir, checkpoint_path) tuples (new format)
         device: Device to load models on
+        compile_model: Whether to compile models with torch.compile() (default: True)
     
     Returns:
         Tuple of (models_dict, metadata_dict, total_memory_gb)
-        where models_dict maps descriptive names to (model, tokenizer) tuples
-        and metadata_dict contains information about each model
     """
     models = {}
     metadata = {}
@@ -582,258 +637,173 @@ def load_multiple_models(
     # Check available memory first
     if device.type == 'cuda':
         torch.cuda.empty_cache()
-        available_memory = torch.cuda.get_device_properties(0).total_memory
-        used_memory = torch.cuda.memory_allocated()
-        free_memory = available_memory - used_memory
-        print_info(f"Available GPU memory: {free_memory / 1e9:.2f} GB")
+        free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+        print_message(f"Available GPU memory: {free_memory / 1e9:.2f} GB", "info")
     
-    # Handle both old format (list of paths) and new format (list of tuples)
-    checkpoint_list = []
+    # Normalize checkpoint format
     if checkpoint_info and isinstance(checkpoint_info[0], tuple):
-        # New format: (run_dir, checkpoint_path) tuples
-        for run_dir, checkpoint_path in checkpoint_info:
-            run_name = run_dir.name if run_dir != checkpoint_path.parent else "base"
-            checkpoint_list.append((run_name, checkpoint_path))
+        checkpoint_list = [(r.name if r != c.parent else "base", c) for r, c in checkpoint_info]
     else:
-        # Old format: just checkpoint paths
-        for checkpoint_path in checkpoint_info:
-            checkpoint_list.append(("base", checkpoint_path))
+        checkpoint_list = [("base", c) for c in checkpoint_info]
     
     print(f"\n{Colors.BOLD}Loading {len(checkpoint_list)} Models...{Colors.ENDC}")
     print("-" * 60)
     
+    # Load shared tokenizer once
+    tokenizer = _load_tokenizer()
+    
     for idx, (run_name, checkpoint_path) in enumerate(checkpoint_list, 1):
-        # Create descriptive model name
-        if run_name != "base":
-            model_name = f"{run_name}/{checkpoint_path.name}"
-        else:
-            model_name = checkpoint_path.name
-        
+        model_name = f"{run_name}/{checkpoint_path.name}" if run_name != "base" else checkpoint_path.name
         print(f"\n{Colors.CYAN}Model {idx}/{len(checkpoint_list)}: {model_name}{Colors.ENDC}")
         
         try:
-            # Load model and tokenizer
-            model, tokenizer = load_model_and_tokenizer(checkpoint_path, device)
+            # Load only the model (tokenizer is shared)
+            model, _ = load_model_and_tokenizer(checkpoint_path, device, compile_model)
             
-            # Calculate memory usage
+            # Calculate memory
             model_memory = sum(p.numel() * p.element_size() for p in model.parameters())
             total_memory += model_memory
             
-            # Store in dictionary with descriptive name
+            # Store model
             models[model_name] = (model, tokenizer)
+            metadata[model_name] = create_model_metadata(model, run_name, checkpoint_path, model_memory)
             
-            # Store metadata for display
-            metadata[model_name] = {
-                'run': run_name,
-                'checkpoint': checkpoint_path.name,
-                'params': sum(p.numel() for p in model.parameters()),
-                'memory_mb': model_memory / 1e6
-            }
+            print_message(f"✓ Loaded {model_name} ({model_memory / 1e6:.1f} MB)", "success")
             
-            print_success(f"✓ Loaded {model_name} ({model_memory / 1e6:.1f} MB)")
-            
-            # Check memory after each load
             if device.type == 'cuda':
-                current_usage = torch.cuda.memory_allocated() / 1e9
-                print_info(f"Current GPU memory usage: {current_usage:.2f} GB")
+                print_message(f"GPU memory usage: {torch.cuda.memory_allocated() / 1e9:.2f} GB", "info")
                 
         except Exception as e:
-            print_error(f"Failed to load {model_name}: {e}")
-            print_warning(f"Continuing with other models...")
+            print_message(f"Failed to load {model_name}: {e}", "error")
+            print_message(f"Continuing with other models...", "warning")
     
     print("\n" + "=" * 60)
-    print_success(f"Successfully loaded {len(models)} out of {len(checkpoint_list)} models")
-    print_info(f"Total model memory: {total_memory / 1e9:.2f} GB")
+    print_message(f"Loaded {len(models)}/{len(checkpoint_list)} models", "success")
+    print_message(f"Total memory: {total_memory / 1e9:.2f} GB", "info")
     
-    if not models:
-        print_error("No models could be loaded!")
-        return None, None, 0
+    return models, metadata, total_memory / 1e9 if models else (None, None, 0)
+
+
+
+
+
+
+
+
+def encode_prompt(tokenizer: WikipediaTokenizer, prompt: str, device: torch.device) -> Tuple[torch.Tensor, List[int], Dict]:
+    """Encode prompt text into tokens with proper handling.
     
-    return models, metadata, total_memory / 1e9
-
-
-
-
-def select_prompt_mode() -> Tuple[str, Optional[str]]:
-    """Select prompt input mode.
+    Args:
+        tokenizer: Tokenizer to use
+        prompt: Text prompt
+        device: Device to place tensor on
     
     Returns:
-        Tuple of (mode, prompt) where mode is 'custom' or 'exit'
+        Tuple of (input_tensor, input_ids, special_tokens)
     """
-    print(f"\n{Colors.BOLD}Enter Prompt:{Colors.ENDC}")
-    print("  Type your prompt or 'q' to quit")
+    # Encode prompt without auto-added special tokens to avoid trailing EOS
+    input_ids = tokenizer.encode(prompt, add_special_tokens=False)
     
-    prompt = input(f"\n{Colors.BOLD}> {Colors.ENDC}")
-    
-    if prompt.lower() == 'q' or prompt.lower() == 'quit':
-        return 'exit', None
-    elif prompt.strip():
-        return 'custom', prompt
-    else:
-        print_warning("Empty prompt. Please try again.")
-        return select_prompt_mode()
-
-
-def get_generation_params() -> Dict[str, any]:
-    """Get generation parameters from user or use defaults.
-    
-    Returns:
-        Dictionary of generation parameters
-    """
-    print(f"\n{Colors.BOLD}Generation Parameters:{Colors.ENDC}")
-    print("  Press Enter to use default values")
-    
-    params = {}
-    
-    # Max length
-    default_max_length = 512
-    max_length_input = input(f"  Max length (default {default_max_length}): ")
-    params['max_length'] = int(max_length_input) if max_length_input else default_max_length
-    
-    # Temperature
-    default_temp = 0.8
-    temp_input = input(f"  Temperature (default {default_temp}): ")
-    params['temperature'] = float(temp_input) if temp_input else default_temp
-    
-    # Top-k
-    default_top_k = 50
-    top_k_input = input(f"  Top-k (default {default_top_k}, 0 to disable): ")
-    params['top_k'] = int(top_k_input) if top_k_input else default_top_k
-    params['top_k'] = params['top_k'] if params['top_k'] > 0 else None
-    
-    # Top-p
-    default_top_p = 0.95
-    top_p_input = input(f"  Top-p (default {default_top_p}, 1.0 to disable): ")
-    params['top_p'] = float(top_p_input) if top_p_input else default_top_p
-    params['top_p'] = params['top_p'] if params['top_p'] < 1.0 else None
-    
-    return params
-
-
-def generate_text(
-    model: TransformerLM,
-    tokenizer: WikipediaTokenizer,
-    prompt: str,
-    device: torch.device,
-    **generation_params
-) -> str:
-    """Generate text from prompt.
-    
-    Returns:
-        Generated text string
-    """
-    # Encode prompt (no cleaning needed - CodeLlama handles Unicode)
-    print_info(f"Encoding prompt...")
-    input_ids = tokenizer.encode(prompt)
-    
-    # Add BOS token at the beginning if not present
+    # Get special token IDs
     special_tokens = tokenizer.get_special_token_ids()
     bos_id = special_tokens['bos_token_id']
-    if input_ids[0] != bos_id:
-        input_ids = [bos_id] + input_ids
+    eos_id = special_tokens['eos_token_id']
+    
+    # Add BOS token explicitly (training data always had BOS at start)
+    input_ids = [bos_id] + input_ids
+    
+    # Defensive: ensure no EOS appended by mistake
+    if len(input_ids) > 0 and input_ids[-1] == eos_id:
+        input_ids = input_ids[:-1]
     
     # Convert to tensor
     input_tensor = torch.tensor(input_ids, dtype=torch.long, device=device).unsqueeze(0)
-    print_info(f"Input tokens: {len(input_ids)}")
     
-    # Generate
-    print_info("Generating...")
-    start_time = time.time()
+    return input_tensor, input_ids, special_tokens
+
+
+def calculate_generation_stats(generated_ids: List[int], input_ids: List[int], generation_time: float) -> Dict[str, any]:
+    """Calculate generation statistics.
     
-    with torch.no_grad():
-        generated_ids = model.generate(
-            input_tensor,
-            eos_token_id=special_tokens['eos_token_id'],
-            **generation_params
-        )
+    Args:
+        generated_ids: Generated token IDs
+        input_ids: Input token IDs
+        generation_time: Time taken for generation
     
-    generation_time = time.time() - start_time
-    
-    # Decode generated text
-    generated_ids = generated_ids[0].tolist()  # Get first batch element
-    generated_text = tokenizer.decode(generated_ids)
-    
-    # Calculate statistics
+    Returns:
+        Dictionary with generation statistics
+    """
     tokens_generated = len(generated_ids) - len(input_ids)
     tokens_per_sec = tokens_generated / generation_time if generation_time > 0 else 0
     
-    # Print statistics
-    print_success(f"Generation complete!")
-    print_info(f"Tokens generated: {tokens_generated}")
-    print_info(f"Time taken: {generation_time:.2f}s")
-    print_info(f"Speed: {tokens_per_sec:.1f} tokens/sec")
-    
-    return generated_text
+    return {
+        'tokens_generated': tokens_generated,
+        'generation_time': generation_time,
+        'tokens_per_sec': tokens_per_sec,
+        'input_tokens': len(input_ids)
+    }
 
 
-def generate_text_multi_model(
+def generate_text_unified(
     models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]],
     prompt: str,
     device: torch.device,
     **generation_params
-) -> Dict[str, Dict[str, any]]:
-    """Generate text from multiple models for comparison.
+) -> Union[str, Dict[str, Dict[str, any]]]:
+    """Unified text generation for single or multiple models.
     
     Returns:
-        Dictionary mapping model names to generation results
+        str for single model, dict of results for multiple models
     """
-    results = {}
+    single_model = len(models_dict) == 1
+    results = {} if not single_model else None
     
-    print(f"\n{Colors.BOLD}Generating from {len(models_dict)} models...{Colors.ENDC}")
-    print(f"Prompt: {Colors.CYAN}{prompt}{Colors.ENDC}")
-    print("-" * 60)
+    if not single_model:
+        print(f"\n{Colors.BOLD}Generating from {len(models_dict)} models...{Colors.ENDC}")
+        print(f"Prompt: {Colors.CYAN}{prompt}{Colors.ENDC}")
+        print("-" * 60)
     
     for idx, (model_name, (model, tokenizer)) in enumerate(models_dict.items(), 1):
-        print(f"\n{Colors.BLUE}[{idx}/{len(models_dict)}] Model: {model_name}{Colors.ENDC}")
+        if not single_model:
+            print(f"\n{Colors.BLUE}[{idx}/{len(models_dict)}] Model: {model_name}{Colors.ENDC}")
         
         try:
-            # Encode prompt  
-            input_ids = tokenizer.encode(prompt)
-            
-            # Get special token IDs
-            special_tokens = tokenizer.get_special_token_ids()
-            bos_id = special_tokens['bos_token_id']
-            
-            # Add BOS token if needed
-            if input_ids[0] != bos_id:
-                input_ids = [bos_id] + input_ids
-            
-            # Convert to tensor
-            input_tensor = torch.tensor(input_ids, dtype=torch.long, device=device).unsqueeze(0)
+            # Encode prompt
+            if single_model:
+                print_message("Encoding prompt...", "info")
+            input_tensor, input_ids, special_tokens = encode_prompt(tokenizer, prompt, device)
+            print_message(f"Input tokens: {len(input_ids)}", "info")
+            print_message("Generating...", "info")
             
             # Generate
             start_time = time.time()
-            
             with torch.no_grad():
                 generated_ids = model.generate(
                     input_tensor,
                     eos_token_id=special_tokens['eos_token_id'],
                     **generation_params
                 )
-            
             generation_time = time.time() - start_time
             
-            # Decode generated text
+            # Decode and calculate stats
             generated_ids = generated_ids[0].tolist()
             generated_text = tokenizer.decode(generated_ids)
+            stats = calculate_generation_stats(generated_ids, input_ids, generation_time)
             
-            # Calculate statistics
-            tokens_generated = len(generated_ids) - len(input_ids)
-            tokens_per_sec = tokens_generated / generation_time if generation_time > 0 else 0
+            print_message("Generation complete!", "success")
+            print_message(f"Tokens generated: {stats['tokens_generated']}", "info")
+            print_message(f"Time taken: {stats['generation_time']:.2f}s", "info")
+            print_message(f"Speed: {stats['tokens_per_sec']:.1f} tokens/sec", "info")
             
-            # Store results
-            results[model_name] = {
-                'text': generated_text,
-                'tokens_generated': tokens_generated,
-                'generation_time': generation_time,
-                'tokens_per_sec': tokens_per_sec,
-                'input_tokens': len(input_ids)
-            }
-            
-            print_success(f"✓ Generated {tokens_generated} tokens in {generation_time:.2f}s")
-            
+            if single_model:
+                return generated_text
+            else:
+                results[model_name] = {'text': generated_text, **stats}
+                
         except Exception as e:
-            print_error(f"Generation failed for {model_name}: {e}")
+            if single_model:
+                raise e
+            print_message(f"Generation failed for {model_name}: {e}", "error")
             results[model_name] = {
                 'text': f"[ERROR: {str(e)}]",
                 'tokens_generated': 0,
@@ -846,29 +816,63 @@ def generate_text_multi_model(
     return results
 
 
-def display_multi_model_results(results: Dict[str, Dict[str, any]], prompt: str, metadata: Optional[Dict[str, Dict]] = None):
-    """Display comparison results from multiple models.
+def get_general_knowledge_prompts() -> List[Tuple[str, str]]:
+    """Get a curated list of general knowledge text completion prompts.
+    
+    Returns:
+        List of (category, prompt) tuples
+    """
+    prompts = [
+        ("Science - Physics", "The theory of relativity was developed by Albert Einstein and states that"),
+        ("Science - Biology", "Photosynthesis is the process by which plants"),
+        ("History", "The Renaissance period in Europe was characterized by"),
+        ("Geography", "The Amazon rainforest is important for the global climate because"),
+        ("Mathematics", "The Pythagorean theorem states that in a right triangle"),
+        ("Technology", "Artificial intelligence differs from traditional programming in that"),
+        ("Literature", "Shakespeare's most famous works include plays such as"),
+        ("Chemistry", "The periodic table organizes elements based on"),
+        ("Economics", "Supply and demand are fundamental concepts that explain how"),
+        ("Philosophy", "The Socratic method is a form of inquiry that involves")
+    ]
+    return prompts
+
+
+def display_results(results: Union[str, Dict[str, Dict[str, any]]], 
+                   prompt: str, 
+                   metadata: Optional[Dict[str, Dict]] = None,
+                   mode: str = "comparison"):
+    """Unified display function for all result types.
     
     Args:
-        results: Generation results from each model
-        prompt: The prompt used for generation
-        metadata: Optional dictionary containing metadata for each model
+        results: Either a string (single model) or dict of results (multi-model)
+        prompt: The prompt used
+        metadata: Optional metadata
+        mode: Display mode ("comparison", "general_knowledge")
     """
+    # Single model result
+    if isinstance(results, str):
+        print(f"\n{Colors.GREEN}{Colors.BOLD}Generated Text:{Colors.ENDC}")
+        print("=" * 60)
+        print(results)
+        print("=" * 60)
+        return
+    
+    # Multi-model results
+    title = "GENERAL KNOWLEDGE EVALUATION" if mode == "general_knowledge" else "MODEL COMPARISON RESULTS"
     print(f"\n{Colors.HEADER}{Colors.BOLD}{'=' * 70}{Colors.ENDC}")
-    print(f"{Colors.HEADER}{Colors.BOLD}{'MODEL COMPARISON RESULTS'.center(70)}{Colors.ENDC}")
+    print(f"{Colors.HEADER}{Colors.BOLD}{title.center(70)}{Colors.ENDC}")
     print(f"{Colors.HEADER}{Colors.BOLD}{'=' * 70}{Colors.ENDC}")
     
-    print(f"\n{Colors.BOLD}Prompt:{Colors.ENDC} {Colors.CYAN}{prompt}{Colors.ENDC}\n")
+    if mode != "general_knowledge":
+        print(f"\n{Colors.BOLD}Prompt:{Colors.ENDC} {Colors.CYAN}{prompt}{Colors.ENDC}\n")
     
     # Display each model's output
     for idx, (model_name, result) in enumerate(results.items(), 1):
         print(f"\n{Colors.BLUE}{'─' * 70}{Colors.ENDC}")
         print(f"{Colors.BLUE}{Colors.BOLD}Model {idx}: {model_name}{Colors.ENDC}")
         
-        # Display metadata if available
         if metadata and model_name in metadata:
             model_metadata = metadata[model_name]
-            print(f"{Colors.CYAN}  Run: {model_metadata['run']}, Checkpoint: {model_metadata['checkpoint']}{Colors.ENDC}")
             print(f"{Colors.CYAN}  Parameters: {model_metadata['params']:,}, Memory: {model_metadata['memory_mb']:.1f} MB{Colors.ENDC}")
         
         print(f"{Colors.BLUE}{'─' * 70}{Colors.ENDC}")
@@ -876,271 +880,199 @@ def display_multi_model_results(results: Dict[str, Dict[str, any]], prompt: str,
         if result.get('error'):
             print(f"{Colors.RED}Generation failed: {result['text']}{Colors.ENDC}")
         else:
-            print(f"\n{result['text']}\n")
+            text = result.get('text', result.get('completion', ''))
+            if mode == "general_knowledge" and 'category' in result:
+                print(f"Category: {result['category']}")
+                print(f"Prompt: {result['prompt']}")
             
-            # Display statistics
+            # Truncate long text for display
+            if len(text) > 200 and mode == "general_knowledge":
+                text = text[:200] + "..."
+            print(f"\n{text}\n")
+            
             print(f"{Colors.CYAN}Statistics:{Colors.ENDC}")
-            print(f"  • Tokens generated: {result['tokens_generated']}")
-            print(f"  • Generation time: {result['generation_time']:.2f}s")
-            print(f"  • Speed: {result['tokens_per_sec']:.1f} tokens/sec")
+            print(f"  • Tokens generated: {result.get('tokens_generated', 0)}")
+            print(f"  • Generation time: {result.get('generation_time', 0):.2f}s")
+            if result.get('tokens_per_sec'):
+                print(f"  • Speed: {result['tokens_per_sec']:.1f} tokens/sec")
     
-    # Summary comparison
-    print(f"\n{Colors.GREEN}{'─' * 70}{Colors.ENDC}")
-    print(f"{Colors.GREEN}{Colors.BOLD}Performance Summary:{Colors.ENDC}")
-    print(f"{Colors.GREEN}{'─' * 70}{Colors.ENDC}")
-    
+    # Performance summary
     valid_results = {k: v for k, v in results.items() if not v.get('error')}
     if valid_results:
-        # Find fastest and most productive
-        fastest = min(valid_results.items(), key=lambda x: x[1]['generation_time'])
-        most_tokens = max(valid_results.items(), key=lambda x: x[1]['tokens_generated'])
-        highest_speed = max(valid_results.items(), key=lambda x: x[1]['tokens_per_sec'])
+        print(f"\n{Colors.GREEN}{'─' * 70}{Colors.ENDC}")
+        print(f"{Colors.GREEN}{Colors.BOLD}Performance Summary:{Colors.ENDC}")
+        print(f"{Colors.GREEN}{'─' * 70}{Colors.ENDC}")
         
-        print(f"  • Fastest generation: {fastest[0]} ({fastest[1]['generation_time']:.2f}s)")
+        fastest = min(valid_results.items(), key=lambda x: x[1].get('generation_time', float('inf')))
+        most_tokens = max(valid_results.items(), key=lambda x: x[1].get('tokens_generated', 0))
+        
+        print(f"  • Fastest: {fastest[0]} ({fastest[1]['generation_time']:.2f}s)")
         print(f"  • Most tokens: {most_tokens[0]} ({most_tokens[1]['tokens_generated']} tokens)")
-        print(f"  • Highest speed: {highest_speed[0]} ({highest_speed[1]['tokens_per_sec']:.1f} tok/s)")
+        
+        if mode == "general_knowledge":
+            success_rate = len(valid_results) / len(results) * 100
+            print(f"  • Success rate: {success_rate:.1f}%")
     
     print(f"{Colors.GREEN}{'=' * 70}{Colors.ENDC}")
 
 
 def main():
     """Main inference loop."""
-    print_header("Transformer Language Model Inference")
+    print_message("Transformer Language Model Inference", "header")
     
     # Check CUDA availability
     if torch.cuda.is_available():
         device = torch.device('cuda')
-        print_success(f"Using GPU: {torch.cuda.get_device_name()}")
-        print_info(f"CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        print_message(f"Using GPU: {torch.cuda.get_device_name()}", "success")
+        print_message(f"CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB", "info")
     else:
         device = torch.device('cpu')
-        print_warning("CUDA not available. Using CPU (will be slower)")
+        print_message("CUDA not available. Using CPU (will be slower)", "warning")
     
     # Select inference mode
     print(f"\n{Colors.BOLD}Select Inference Mode:{Colors.ENDC}")
     print("  1. Single model inference")
     print("  2. Multi-model comparison")
     print("  3. Benchmark models")
+    print("  4. General knowledge evaluation")
     print("  0. Exit")
     
     while True:
         try:
-            mode_choice = input(f"\n{Colors.BOLD}Select mode (0-3): {Colors.ENDC}")
+            mode_choice = input(f"\n{Colors.BOLD}Select mode (0-4): {Colors.ENDC}")
             mode_choice = int(mode_choice)
             
             if mode_choice == 0:
-                print_info("Exiting...")
+                print_message("Exiting...", "info")
                 sys.exit(0)
-            elif mode_choice in [1, 2, 3]:
+            elif mode_choice in [1, 2, 3, 4]:
                 break
             else:
-                print_warning("Please enter 0, 1, 2, or 3")
+                print_message("Please enter 0, 1, 2, 3, or 4", "warning")
         except ValueError:
-            print_warning("Invalid input. Please enter a number.")
+            print_message("Invalid input. Please enter a number.", "warning")
     
     # Select checkpoint directory
     base_checkpoint_dir = Path("checkpoints")
     if not base_checkpoint_dir.exists():
-        print_error(f"Checkpoint directory not found: {base_checkpoint_dir}")
+        print_message(f"Checkpoint directory not found: {base_checkpoint_dir}", "error")
         sys.exit(1)
     
-    if mode_choice == 1:
-        # Single model mode - still uses single run selection
-        run_dir = select_run_directory(base_checkpoint_dir)
-        if run_dir is None:
-            print_warning("No training run selected. Exiting.")
-            sys.exit(0)
-        
-        # Single model mode
-        checkpoint_path = select_checkpoint(run_dir)
-        if checkpoint_path is None:
-            print_info("Checkpoint selection cancelled.")
-            sys.exit(0)
-        
-        # Load model and tokenizer
-        print(f"\n{Colors.BOLD}Loading Model and Tokenizer...{Colors.ENDC}")
-        try:
-            model, tokenizer = load_model_and_tokenizer(checkpoint_path, device)
-        except Exception as e:
-            print_error(f"Failed to load model: {e}")
-            sys.exit(1)
-        
-        print_success("Model and tokenizer loaded successfully!")
-        
-        # Run single model inference loop
-        run_single_model_inference(model, tokenizer, device)
-        
-    elif mode_choice == 2:
-        # Multi-model mode - now supports cross-run selection
-        checkpoint_info = select_checkpoints_from_multiple_runs(base_checkpoint_dir)
-        if checkpoint_info is None or len(checkpoint_info) == 0:
-            print_info("No checkpoints selected. Exiting.")
-            sys.exit(0)
-        
-        # Memory warning for multiple models
-        estimated_memory_per_model = 0.1  # ~100MB per model
-        estimated_total_memory = len(checkpoint_info) * estimated_memory_per_model
-        
-        if device.type == 'cuda':
-            available_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-            if estimated_total_memory > available_memory * 0.8:
-                print_warning(f"Selected {len(checkpoint_info)} models (~{estimated_total_memory:.1f}GB)")
-                print_warning(f"Available GPU memory: {available_memory:.1f}GB")
-                print_warning("This may exceed available memory!")
-                confirm = input(f"\n{Colors.BOLD}Continue anyway? (y/n): {Colors.ENDC}")
-                if confirm.lower() != 'y':
-                    print_info("Model loading cancelled.")
-                    sys.exit(0)
-        else:
-            if len(checkpoint_info) > 5:
-                print_warning(f"Loading {len(checkpoint_info)} models on CPU may be slow.")
-                confirm = input(f"\n{Colors.BOLD}Continue? (y/n): {Colors.ENDC}")
-                if confirm.lower() != 'y':
-                    print_info("Model loading cancelled.")
-                    sys.exit(0)
-        
-        # Load multiple models
-        print(f"\n{Colors.BOLD}Loading Multiple Models...{Colors.ENDC}")
-        try:
-            models_dict, metadata, total_memory = load_multiple_models(checkpoint_info, device)
-            if models_dict is None:
-                print_error("Failed to load any models. Exiting.")
-                sys.exit(1)
-        except Exception as e:
-            print_error(f"Failed to load models: {e}")
-            if "out of memory" in str(e).lower():
-                print_warning("Try selecting fewer models or using CPU instead.")
-            sys.exit(1)
-        
-        print_success(f"Successfully loaded {len(models_dict)} models!")
-        
-        # Run multi-model inference loop with metadata
-        run_multi_model_inference(models_dict, metadata, device)
-    
-    elif mode_choice == 3:
-        # Benchmark mode - also supports cross-run selection
-        checkpoint_info = select_checkpoints_from_multiple_runs(base_checkpoint_dir)
-        if checkpoint_info is None or len(checkpoint_info) == 0:
-            print_info("No checkpoints selected. Exiting.")
-            sys.exit(0)
-        
-        # Memory warning for multiple models
-        estimated_memory_per_model = 0.1  # ~100MB per model
-        estimated_total_memory = len(checkpoint_info) * estimated_memory_per_model
-        
-        if device.type == 'cuda':
-            available_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-            if estimated_total_memory > available_memory * 0.8:
-                print_warning(f"Selected {len(checkpoint_info)} models (~{estimated_total_memory:.1f}GB)")
-                print_warning(f"Available GPU memory: {available_memory:.1f}GB")
-                print_warning("This may exceed available memory!")
-                confirm = input(f"\n{Colors.BOLD}Continue anyway? (y/n): {Colors.ENDC}")
-                if confirm.lower() != 'y':
-                    print_info("Model loading cancelled.")
-                    sys.exit(0)
-        else:
-            if len(checkpoint_info) > 3:
-                print_warning(f"Loading {len(checkpoint_info)} models on CPU for benchmarking may be slow.")
-                confirm = input(f"\n{Colors.BOLD}Continue? (y/n): {Colors.ENDC}")
-                if confirm.lower() != 'y':
-                    print_info("Model loading cancelled.")
-                    sys.exit(0)
-        
-        # Load multiple models for benchmarking
-        print(f"\n{Colors.BOLD}Loading Models for Benchmarking...{Colors.ENDC}")
-        try:
-            models_dict, metadata, total_memory = load_multiple_models(checkpoint_info, device)
-            if models_dict is None:
-                print_error("Failed to load any models. Exiting.")
-                sys.exit(1)
-        except Exception as e:
-            print_error(f"Failed to load models: {e}")
-            if "out of memory" in str(e).lower():
-                print_warning("Try selecting fewer models or using CPU instead.")
-            sys.exit(1)
-        
-        print_success(f"Successfully loaded {len(models_dict)} models for benchmarking!")
-        
-        # Run benchmark evaluation
-        run_benchmark_mode(models_dict, device)
-
-
-def run_single_model_inference(model: TransformerLM, tokenizer: WikipediaTokenizer, device: torch.device):
-    """Run single model inference loop."""
-    
-    # Main generation loop
-    print(f"\n{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
-    print(f"{Colors.CYAN}Starting single model generation session...{Colors.ENDC}")
-    print(f"{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
-    
     try:
-        while True:
-            # Select prompt mode
-            mode, prompt = select_prompt_mode()
+        if mode_choice == 1:
+            # Single model inference
+            result = load_models_for_inference(base_checkpoint_dir, device, multi_model=False)
+            if result is None:
+                sys.exit(0)
             
-            if mode == 'exit':
-                print_info("Exiting...")
-                break
+            models_dict, metadata = result
+            run_generation_loop(models_dict, device, metadata)
             
-            if not prompt:
-                print_warning("Empty prompt. Please try again.")
-                continue
+        elif mode_choice == 2:
+            # Multi-model comparison
+            result = load_models_for_inference(base_checkpoint_dir, device, multi_model=True)
+            if result is None:
+                sys.exit(0)
             
-            # Get generation parameters (once for all prompts)
-            print(f"\n{Colors.BOLD}Configure Generation:{Colors.ENDC}")
-            print("  1. Use default parameters")
-            print("  2. Customize parameters")
+            models_dict, metadata = result
+            run_generation_loop(models_dict, device, metadata)
+        
+        elif mode_choice == 3:
+            # Benchmark mode - disable compilation to avoid Flash Attention issues
+            result = load_models_for_inference(base_checkpoint_dir, device, multi_model=True, compile_model=False)
+            if result is None:
+                sys.exit(0)
             
-            param_choice = input(f"\n{Colors.BOLD}Select (1-2): {Colors.ENDC}")
+            models_dict, metadata = result
+            run_benchmark(models_dict, device)
+        
+        elif mode_choice == 4:
+            # General knowledge evaluation
+            print(f"\n{Colors.BOLD}Model Selection for General Knowledge Evaluation{Colors.ENDC}")
+            print("  1. Single model evaluation")
+            print("  2. Multi-model comparison")
             
-            if param_choice == '2':
-                generation_params = get_generation_params()
-            else:
-                generation_params = {
-                    'max_length': 200,
-                    'temperature': 0.8,
-                    'top_k': 50,
-                    'top_p': 0.95
-                }
-                print_info("Using default parameters")
+            eval_choice = None
+            while eval_choice not in [1, 2]:
+                try:
+                    eval_choice = int(input(f"\n{Colors.BOLD}Select (1-2): {Colors.ENDC}"))
+                    if eval_choice not in [1, 2]:
+                        print_message("Please enter 1 or 2", "warning")
+                except ValueError:
+                    print_message("Invalid input. Please enter a number.", "warning")
             
-            # Generate text
-            print(f"\n{Colors.BOLD}Generating...{Colors.ENDC}")
-            print("-" * 60)
+            result = load_models_for_inference(base_checkpoint_dir, device, multi_model=(eval_choice == 2))
+            if result is None:
+                sys.exit(0)
             
-            try:
-                generated_text = generate_text(
-                    model, tokenizer, prompt, device,
-                    **generation_params
-                )
-                
-                # Display generated text
-                print(f"\n{Colors.GREEN}{Colors.BOLD}Generated Text:{Colors.ENDC}")
-                print("=" * 60)
-                print(generated_text)
-                print("=" * 60)
-                
-            except Exception as e:
-                print_error(f"Generation failed: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            # Ask to continue
-            print(f"\n{Colors.BOLD}Continue?{Colors.ENDC}")
-            cont = input("Press Enter to generate more, or 'q' to quit: ")
-            if cont.lower() == 'q':
-                break
+            models_dict, metadata = result
+            run_general_knowledge_eval(models_dict, device, metadata)
     
     except KeyboardInterrupt:
-        print_warning("\nInterrupted by user")
-    
+        print_message("\nInterrupted by user", "warning")
+    except Exception as e:
+        print_message(f"Error: {e}", "error")
+        import traceback
+        traceback.print_exc()
     finally:
-        # Cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            print_info("GPU cache cleared")
+        cleanup_session(device)
+
+
+def cleanup_session(device: torch.device):
+    """Clean up GPU cache and print session end message."""
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+        print_message("GPU cache cleared", "info")
+
+
+
+
+def get_generation_params_interactive(defaults: Optional[Dict[str, any]] = None) -> Dict[str, any]:
+    """Get generation parameters interactively from user.
+    
+    Args:
+        defaults: Optional dictionary of default values to use
+    
+    Returns:
+        Dictionary of generation parameters
+    """
+    if defaults is None:
+        defaults = {'max_length': 200, 'temperature': 0.8, 'top_k': 50, 'top_p': 0.95}
+    
+    print(f"\n{Colors.BOLD}Configure Generation:{Colors.ENDC}")
+    print("  1. Use default parameters")
+    print("  2. Customize parameters")
+    
+    param_choice = input(f"\n{Colors.BOLD}Select (1-2): {Colors.ENDC}")
+    
+    if param_choice == '2':
+        print(f"\n{Colors.BOLD}Generation Parameters:{Colors.ENDC}")
+        print("  Press Enter to use default values")
         
-        print_success("Session ended. Goodbye!")
+        params = {}
+        
+        # Max length
+        max_length_input = input(f"  Max length (default {defaults['max_length']}): ")
+        params['max_length'] = int(max_length_input) if max_length_input else defaults['max_length']
+        
+        # Temperature 
+        temp_input = input(f"  Temperature (default {defaults['temperature']}): ")
+        params['temperature'] = float(temp_input) if temp_input else defaults['temperature']
+        
+        # Top-k
+        top_k_input = input(f"  Top-k (default {defaults['top_k']}, 0 to disable): ")
+        params['top_k'] = int(top_k_input) if top_k_input else defaults['top_k']
+        params['top_k'] = params['top_k'] if params['top_k'] > 0 else None
+        
+        # Top-p
+        top_p_input = input(f"  Top-p (default {defaults['top_p']}, 1.0 to disable): ")
+        params['top_p'] = float(top_p_input) if top_p_input else defaults['top_p']
+        params['top_p'] = params['top_p'] if params['top_p'] < 1.0 else None
+        
+        return params
+    else:
+        print_message("Using default parameters", "info")
+        return defaults
 
 
 
@@ -1151,173 +1083,287 @@ def run_single_model_inference(model: TransformerLM, tokenizer: WikipediaTokeniz
 
 
 
-def run_benchmark_mode(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], device: torch.device):
-    """Run comprehensive benchmarks on selected models."""
+
+
+
+
+def run_generation_loop(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], 
+                       device: torch.device, 
+                       metadata: Optional[Dict] = None):
+    """Run text generation loop."""
+    is_multi = len(models_dict) > 1
+    session_type = "multi-model comparison" if is_multi else "single model generation"
+    
+    print(f"\n{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
+    print(f"{Colors.CYAN}Starting {session_type} session...{Colors.ENDC}")
+    if is_multi:
+        print(f"{Colors.CYAN}{len(models_dict)} models loaded for comparison{Colors.ENDC}")
+    print(f"{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
+    
+    while True:
+        print(f"\n{Colors.BOLD}Enter Prompt:{Colors.ENDC}")
+        print("  Type your prompt or 'q' to quit")
+        
+        prompt = input(f"\n{Colors.BOLD}> {Colors.ENDC}")
+        
+        if prompt.lower() in ['q', 'quit']:
+            print_message("Exiting...", "info")
+            break
+        
+        if not prompt.strip():
+            print_message("Empty prompt. Please try again.", "warning")
+            continue
+        
+        # Get generation parameters
+        defaults = {'max_length': 512 if is_multi else 200, 'temperature': 0.8, 'top_k': 50, 'top_p': 0.95}
+        generation_params = get_generation_params_interactive(defaults)
+        
+        print(f"\n{Colors.BOLD}Generating...{Colors.ENDC}")
+        print("-" * 60)
+        
+        try:
+            results = generate_text_unified(models_dict, prompt, device, **generation_params)
+            display_results(results, prompt, metadata)
+        except Exception as e:
+            print_message(f"Generation failed: {e}", "error")
+            import traceback
+            traceback.print_exc()
+        
+        # Continue prompt
+        cont = input("\nPress Enter to generate more, or 'q' to quit: ")
+        if cont.lower() == 'q':
+            break
+
+
+def run_benchmark(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], device: torch.device):
+    """Run benchmark evaluation."""
     print(f"\n{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.CYAN}Starting benchmark evaluation...{Colors.ENDC}")
     print(f"{Colors.CYAN}{len(models_dict)} models loaded for benchmarking{Colors.ENDC}")
     print(f"{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
     
-    # Configure benchmark
-    print(f"\n{Colors.BOLD}Configure Benchmark:{Colors.ENDC}")
-    print("  1. Quick benchmark (fewer samples, faster)")
-    print("  2. Standard benchmark (recommended)")
-    print("  3. Comprehensive benchmark (more samples, slower)")
+    configs = [
+        ('Quick', {'wikitext_samples': 50, 'lambada_samples': 20, 'hellaswag_samples': 10,
+                   'max_length': 512, 'max_new_tokens': 30}),
+        ('Standard', {'wikitext_samples': 100, 'lambada_samples': 50, 'hellaswag_samples': 20,
+                      'max_length': 512, 'max_new_tokens': 30}),
+        ('Comprehensive', {'wikitext_samples': 200, 'lambada_samples': 100, 'hellaswag_samples': 40,
+                           'max_length': 512, 'max_new_tokens': 30})
+    ]
     
-    while True:
-        try:
-            bench_choice = input(f"\n{Colors.BOLD}Select configuration (1-3): {Colors.ENDC}")
-            bench_choice = int(bench_choice)
-            
-            if bench_choice == 1:
-                config = {
-                    'wikitext_samples': 50,
-                    'lambada_samples': 20,
-                    'hellaswag_samples': 10,
-                    'max_length': 512,
-                    'max_new_tokens': 20
-                }
-                print_info("Using quick benchmark configuration")
-                break
-            elif bench_choice == 2:
-                config = {
-                    'wikitext_samples': 100,
-                    'lambada_samples': 50,
-                    'hellaswag_samples': 20,
-                    'max_length': 512,
-                    'max_new_tokens': 30
-                }
-                print_info("Using standard benchmark configuration")
-                break
-            elif bench_choice == 3:
-                config = {
-                    'wikitext_samples': 200,
-                    'lambada_samples': 100,
-                    'hellaswag_samples': 40,
-                    'max_length': 512,
-                    'max_new_tokens': 40
-                }
-                print_info("Using comprehensive benchmark configuration")
-                break
-            else:
-                print_warning("Please enter 1, 2, or 3")
-        except ValueError:
-            print_warning("Invalid input. Please enter a number.")
+    config_items = [(f"{name} ({cfg['wikitext_samples']} samples)", cfg) for name, cfg in configs]
+    config = select_items_interactive(config_items, "Select Benchmark Configuration:")
     
-    # Run benchmarks
+    if config is None:
+        print_message("Benchmark cancelled.", "info")
+        return
+    
     print(f"\n{Colors.BOLD}Running Benchmarks...{Colors.ENDC}")
-    print_warning("This may take several minutes depending on the configuration.")
+    print_message("This may take several minutes.", "warning")
     
-    try:
-        benchmark = ModelBenchmark(device)
-        results = benchmark.run_full_benchmark(models_dict, config)
-        
-        # Display results
-        print("\n" + format_benchmark_results(results))
-        
-        # Save results
-        save_benchmark_results(results)
-        
-        print_success("\nBenchmark completed successfully!")
-        
-        # Ask if user wants to see detailed results
-        print(f"\n{Colors.BOLD}Options:{Colors.ENDC}")
-        print("  1. View detailed results per model")
-        print("  2. Return to main menu")
-        
-        detail_choice = input(f"\n{Colors.BOLD}Select option (1-2): {Colors.ENDC}")
-        
-        if detail_choice == '1':
-            for model_name, model_results in results.items():
-                print(f"\n{Colors.BLUE}{'='*60}{Colors.ENDC}")
-                print(f"{Colors.BLUE}Detailed Results for: {model_name}{Colors.ENDC}")
-                print(f"{Colors.BLUE}{'='*60}{Colors.ENDC}")
-                for metric, value in model_results.items():
-                    if metric != 'error':
-                        if isinstance(value, float):
-                            if 'acc' in metric:
-                                print(f"  {metric}: {value:.2f}%")
-                            else:
-                                print(f"  {metric}: {value:.4f}")
-                        else:
-                            print(f"  {metric}: {value}")
-        
-    except Exception as e:
-        print_error(f"Benchmark failed: {e}")
-        import traceback
-        traceback.print_exc()
+    benchmark = ModelBenchmark(device)
+    results = benchmark.run_full_benchmark(models_dict, benchmark_config=config)
     
-    finally:
-        # Cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            print_info("GPU cache cleared")
+    print("\n" + format_benchmark_results(results))
+    save_benchmark_results(results)
+    print_message("\nBenchmark completed successfully!", "success")
 
 
-def run_multi_model_inference(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], metadata: Dict[str, Dict], device: torch.device):
-    """Run multi-model comparison inference loop with metadata."""
-    # Main generation loop
-    print(f"\n{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
-    print(f"{Colors.CYAN}Starting multi-model comparison session...{Colors.ENDC}")
-    print(f"{Colors.CYAN}{len(models_dict)} models loaded for comparison{Colors.ENDC}")
-    print(f"{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
+def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], 
+                              device: torch.device, 
+                              metadata: Optional[Dict] = None):
+    """Run general knowledge evaluation."""
+    print(f"\n{Colors.CYAN}{'=' * 70}{Colors.ENDC}")
+    print(f"{Colors.CYAN}Starting General Knowledge Evaluation...{Colors.ENDC}")
+    print(f"{Colors.CYAN}{len(models_dict)} model(s) loaded for evaluation{Colors.ENDC}")
+    print(f"{Colors.CYAN}{'=' * 70}{Colors.ENDC}")
     
-    try:
-        while True:
-            # Select prompt mode
-            mode, prompt = select_prompt_mode()
+    prompts = get_general_knowledge_prompts()
+    print(f"\n{Colors.BOLD}Evaluating {len(prompts)} knowledge areas{Colors.ENDC}")
+    
+    eval_defaults = {'max_length': 150, 'temperature': 0.7, 'top_k': 40, 'top_p': 0.9}
+    generation_params = get_generation_params_interactive(eval_defaults)
+    
+    all_results = {}
+    
+    # Initialize results structure for all models
+    for model_name in models_dict.keys():
+        all_results[model_name] = []
+    
+    for prompt_idx, (category, prompt) in enumerate(prompts, 1):
+        print(f"\n{Colors.BLUE}[{prompt_idx}/{len(prompts)}] {category}{Colors.ENDC}")
+        
+        # Always call generate_text_unified with all models to get consistent dict results
+        # This works for both single and multiple models
+        try:
+            results = generate_text_unified(models_dict, prompt, device, **generation_params)
             
-            if mode == 'exit':
-                print_info("Exiting...")
-                break
-            
-            if not prompt:
-                print_warning("Empty prompt. Please try again.")
-                continue
-            
-            # Get generation parameters (once for all prompts and models)
-            print(f"\n{Colors.BOLD}Configure Generation:{Colors.ENDC}")
-            print("  1. Use default parameters")
-            print("  2. Customize parameters")
-            
-            param_choice = input(f"\n{Colors.BOLD}Select (1-2): {Colors.ENDC}")
-            
-            if param_choice == '2':
-                generation_params = get_generation_params()
+            # Handle the return value based on whether it's a string (single model) or dict (multiple models)
+            if isinstance(results, str):
+                # Single model case - results is just the generated text
+                model_name = list(models_dict.keys())[0]
+                # Get the tokenizer from the model tuple
+                _, tokenizer = models_dict[model_name]
+                
+                generated_text = results
+                completion = generated_text[len(prompt):].strip() if len(generated_text) > len(prompt) else ""
+                
+                # Calculate tokens properly using the actual tokenizer
+                if completion:
+                    tokens_generated = len(tokenizer.encode(completion, add_special_tokens=False))
+                else:
+                    tokens_generated = 0
+                
+                # Note: We can't get exact generation time from string return, but the stats
+                # were already printed to console by generate_text_unified
+                all_results[model_name].append({
+                    'category': category,
+                    'prompt': prompt,
+                    'completion': completion,
+                    'generation_time': 1.0,  # Placeholder since exact time was printed but not returned
+                    'tokens_generated': tokens_generated
+                })
             else:
-                generation_params = {
-                    'max_length': 512,
-                    'temperature': 0.8,
-                    'top_k': 50,
-                    'top_p': 0.95
-                }
-                print_info("Using default parameters")
-            
-            # Generate from all models
-            results = generate_text_multi_model(
-                models_dict, prompt, device,
-                **generation_params
-            )
-            
-            # Display comparison results with model metadata
-            display_multi_model_results(results, prompt, metadata)
-            
-            # Ask to continue
-            print(f"\n{Colors.BOLD}Continue?{Colors.ENDC}")
-            cont = input("Press Enter to generate more, or 'q' to quit: ")
-            if cont.lower() == 'q':
-                break
+                # Multiple models case - results is a dict
+                for model_name in models_dict.keys():
+                    if model_name in results and not results[model_name].get('error'):
+                        result = results[model_name]
+                        all_results[model_name].append({
+                            'category': category,
+                            'prompt': prompt,
+                            'completion': result['text'][len(prompt):].strip(),
+                            'generation_time': result['generation_time'],
+                            'tokens_generated': result['tokens_generated']
+                        })
+                    else:
+                        # Handle error case
+                        error_msg = results.get(model_name, {}).get('text', '[Generation failed]')
+                        all_results[model_name].append({
+                            'category': category,
+                            'prompt': prompt,
+                            'completion': error_msg,
+                            'generation_time': 0,
+                            'tokens_generated': 0,
+                            'error': True
+                        })
+        except Exception as e:
+            print_message(f"Generation failed: {e}", "error")
+            for model_name in models_dict.keys():
+                all_results[model_name].append({
+                    'category': category,
+                    'prompt': prompt,
+                    'completion': f"[ERROR: {str(e)}]",
+                    'generation_time': 0,
+                    'tokens_generated': 0,
+                    'error': True
+                })
     
-    except KeyboardInterrupt:
-        print_warning("\nInterrupted by user")
+    # Display comprehensive results summary
+    print(f"\n{Colors.HEADER}{'=' * 70}{Colors.ENDC}")
+    print(f"{Colors.HEADER}{Colors.BOLD}GENERAL KNOWLEDGE EVALUATION RESULTS{Colors.ENDC}")
+    print(f"{Colors.HEADER}{'=' * 70}{Colors.ENDC}")
     
-    finally:
-        # Cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            print_info("GPU cache cleared")
+    # Calculate and display summary statistics for each model
+    print(f"\n{Colors.GREEN}{Colors.BOLD}Model Performance Summary:{Colors.ENDC}")
+    print(f"{Colors.GREEN}{'─' * 70}{Colors.ENDC}")
+    
+    for model_name, results_list in all_results.items():
+        successful_results = [r for r in results_list if not r.get('error', False)]
         
-        print_success("Multi-model session ended. Goodbye!")
+        if successful_results:
+            avg_time = sum(r['generation_time'] for r in successful_results) / len(successful_results)
+            total_tokens = sum(r['tokens_generated'] for r in successful_results)
+            avg_tokens = total_tokens / len(successful_results)
+            success_rate = (len(successful_results) / len(results_list)) * 100
+            
+            print(f"\n{Colors.BLUE}{Colors.BOLD}Model: {model_name}{Colors.ENDC}")
+            if metadata and model_name in metadata:
+                model_meta = metadata[model_name]
+                print(f"  • Parameters: {model_meta['params']:,}")
+                print(f"  • Memory: {model_meta['memory_mb']:.1f} MB")
+            print(f"  • Success Rate: {success_rate:.1f}% ({len(successful_results)}/{len(results_list)} prompts)")
+            print(f"  • Average Generation Time: {avg_time:.2f}s")
+            print(f"  • Average Tokens Generated: {avg_tokens:.1f}")
+            print(f"  • Total Tokens Generated: {total_tokens}")
+            
+            # Calculate average tokens per second
+            total_time = sum(r['generation_time'] for r in successful_results)
+            if total_time > 0:
+                avg_speed = total_tokens / total_time
+                print(f"  • Average Speed: {avg_speed:.1f} tokens/sec")
+        else:
+            print(f"\n{Colors.RED}{Colors.BOLD}Model: {model_name}{Colors.ENDC}")
+            print(f"  • All evaluations failed")
+    
+    # Display detailed results by category
+    print(f"\n{Colors.GREEN}{Colors.BOLD}Detailed Results by Category:{Colors.ENDC}")
+    print(f"{Colors.GREEN}{'─' * 70}{Colors.ENDC}")
+    
+    categories_seen = []
+    for model_name, results_list in all_results.items():
+        for result in results_list:
+            if result['category'] not in categories_seen:
+                categories_seen.append(result['category'])
+    
+    for category in categories_seen:
+        print(f"\n{Colors.CYAN}{Colors.BOLD}{category}:{Colors.ENDC}")
+        
+        # Find the prompt for this category
+        prompt_text = next((r['prompt'] for r in all_results[list(all_results.keys())[0]] 
+                           if r['category'] == category), "")
+        if prompt_text:
+            print(f"  Prompt: \"{prompt_text[:80]}...\"" if len(prompt_text) > 80 else f"  Prompt: \"{prompt_text}\"")
+        
+        for model_name in all_results.keys():
+            result = next((r for r in all_results[model_name] if r['category'] == category), None)
+            if result:
+                if result.get('error', False):
+                    print(f"\n  {Colors.RED}{model_name}: [ERROR]{Colors.ENDC}")
+                else:
+                    completion = result['completion']
+                    # Truncate long completions for display
+                    if len(completion) > 150:
+                        completion = completion[:150] + "..."
+                    print(f"\n  {Colors.BLUE}{model_name}:{Colors.ENDC}")
+                    print(f"    {completion}")
+                    print(f"    {Colors.CYAN}({result['tokens_generated']} tokens in {result['generation_time']:.2f}s){Colors.ENDC}")
+    
+    # Display overall comparison if multiple models
+    if len(all_results) > 1:
+        print(f"\n{Colors.GREEN}{'─' * 70}{Colors.ENDC}")
+        print(f"{Colors.GREEN}{Colors.BOLD}Overall Comparison:{Colors.ENDC}")
+        print(f"{Colors.GREEN}{'─' * 70}{Colors.ENDC}")
+        
+        # Find best performing model
+        model_scores = {}
+        for model_name, results_list in all_results.items():
+            successful = [r for r in results_list if not r.get('error', False)]
+            if successful:
+                avg_time = sum(r['generation_time'] for r in successful) / len(successful)
+                success_rate = len(successful) / len(results_list)
+                avg_tokens = sum(r['tokens_generated'] for r in successful) / len(successful)
+                # Combined score (lower is better for time, higher for success rate and tokens)
+                model_scores[model_name] = {
+                    'success_rate': success_rate,
+                    'avg_time': avg_time,
+                    'avg_tokens': avg_tokens
+                }
+        
+        if model_scores:
+            # Best success rate
+            best_success = max(model_scores.items(), key=lambda x: x[1]['success_rate'])
+            print(f"  • Highest Success Rate: {best_success[0]} ({best_success[1]['success_rate']*100:.1f}%)")
+            
+            # Fastest generation
+            fastest = min(model_scores.items(), key=lambda x: x[1]['avg_time'])
+            print(f"  • Fastest Generation: {fastest[0]} ({fastest[1]['avg_time']:.2f}s avg)")
+            
+            # Most productive (tokens)
+            most_productive = max(model_scores.items(), key=lambda x: x[1]['avg_tokens'])
+            print(f"  • Most Productive: {most_productive[0]} ({most_productive[1]['avg_tokens']:.1f} tokens avg)")
+    
+    print(f"\n{Colors.GREEN}{'=' * 70}{Colors.ENDC}")
+    print_message("General knowledge evaluation completed!", "success")
 
 
 if __name__ == "__main__":

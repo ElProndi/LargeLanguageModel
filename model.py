@@ -604,6 +604,12 @@ class TransformerLM(nn.Module):
             'tie_embeddings': tie_embeddings
         }
         
+        # Validate Flash Attention and KV cache compatibility
+        if self.config['use_flash_attention'] and self.config['use_cache']:
+            # Flash Attention and KV caching are mutually exclusive
+            self.config['use_cache'] = False
+            print("⚠️  Warning: Disabling KV cache as Flash Attention is enabled (they're mutually exclusive)")
+        
         # Token embeddings only (RoPE handles position encoding)
         self.embeddings = nn.Embedding(vocab_size, hidden_size, padding_idx=pad_token_id)
         
@@ -938,7 +944,7 @@ class TransformerLM(nn.Module):
         top_p: Optional[float] = None,
         eos_token_id: Optional[int] = None,
         pad_token_id: Optional[int] = None,
-        use_cache: bool = True
+        use_cache: Optional[bool] = None
     ) -> torch.Tensor:
         """
         Generate text autoregressively with optional KV caching for massive speedup.
@@ -959,6 +965,14 @@ class TransformerLM(nn.Module):
         self.eval()
         pad_token_id = pad_token_id or self.config['pad_token_id']
         eos_token_id = eos_token_id or self.config.get('eos_token_id', 2)
+        
+        # Use model's configured use_cache setting if not explicitly overridden
+        if use_cache is None:
+            use_cache = self.config.get('use_cache', True)
+            # Double-check: If Flash Attention is enabled, KV caching must be disabled
+            if self.config.get('use_flash_attention', False) and use_cache:
+                use_cache = False
+                # This shouldn't happen if model was initialized correctly, but safety check
         
         # Initialize with input
         generated = input_ids

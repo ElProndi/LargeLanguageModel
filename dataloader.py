@@ -163,55 +163,117 @@ def create_simple_train_val_dataloaders(
     # Determine which files to load based on file_subset parameter
     total_files = len(numpy_files)
     
-    if file_subset == 'first_fourth':
-        # Load first fourth of files (files 0-9 for 38 total)
-        num_files_per_fourth = total_files // 4
-        # First fourth gets one extra if remainder > 0
-        if total_files % 4 > 0:
-            num_files_per_fourth += 1
-        numpy_files = numpy_files[:num_files_per_fourth]
+    if file_subset == 'first_eighth':
+        # Load first eighth of files (files 0-4 for 38 total)
+        num_files_per_eighth = total_files // 8
+        # First eighth gets one extra if remainder > 0
+        if total_files % 8 > 0:
+            num_files_per_eighth += 1
+        numpy_files = numpy_files[:num_files_per_eighth]
         if verbose:
-            print(f"  Loading first fourth: {len(numpy_files)} of {total_files} files (indices 0-{len(numpy_files)-1})")
-    elif file_subset == 'second_fourth':
-        # Load second fourth of files (files 10-19 for 38 total)
-        num_files_per_fourth = total_files // 4
-        # Calculate sizes for each fourth
-        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
-        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
-        start_idx = first_fourth_size
-        end_idx = first_fourth_size + second_fourth_size
+            print(f"  Loading first eighth: {len(numpy_files)} of {total_files} files (indices 0-{len(numpy_files)-1})")
+    elif file_subset == 'second_eighth':
+        # Load second eighth of files (files 5-9 for 38 total)
+        num_files_per_eighth = total_files // 8
+        # Calculate sizes for each eighth
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        start_idx = first_eighth_size
+        end_idx = first_eighth_size + second_eighth_size
         numpy_files = numpy_files[start_idx:end_idx]
         if verbose:
-            print(f"  Loading second fourth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
-    elif file_subset == 'third_fourth':
-        # Load third fourth of files (files 20-28 for 38 total)
-        num_files_per_fourth = total_files // 4
-        # Calculate sizes for each fourth
-        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
-        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
-        third_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 2 else 0)
-        start_idx = first_fourth_size + second_fourth_size
-        end_idx = first_fourth_size + second_fourth_size + third_fourth_size
+            print(f"  Loading second eighth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
+    elif file_subset == 'third_eighth':
+        # Load third eighth of files (files 10-14 for 38 total)
+        num_files_per_eighth = total_files // 8
+        # Calculate sizes for each eighth
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        start_idx = first_eighth_size + second_eighth_size
+        end_idx = first_eighth_size + second_eighth_size + third_eighth_size
         numpy_files = numpy_files[start_idx:end_idx]
         if verbose:
-            print(f"  Loading third fourth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
-    elif file_subset == 'fourth_fourth':
-        # Load fourth fourth of files (files 29-37 for 38 total)
-        num_files_per_fourth = total_files // 4
-        # Calculate where fourth fourth starts
-        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
-        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
-        third_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 2 else 0)
-        start_idx = first_fourth_size + second_fourth_size + third_fourth_size
+            print(f"  Loading third eighth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
+    elif file_subset == 'fourth_eighth':
+        # Load fourth eighth of files (files 15-19 for 38 total)
+        num_files_per_eighth = total_files // 8
+        # Calculate sizes for each eighth
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        fourth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 3 else 0)
+        start_idx = first_eighth_size + second_eighth_size + third_eighth_size
+        end_idx = first_eighth_size + second_eighth_size + third_eighth_size + fourth_eighth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+        if verbose:
+            print(f"  Loading fourth eighth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
+    elif file_subset == 'fifth_eighth':
+        # Load fifth eighth of files (files 20-23 for 38 total)
+        num_files_per_eighth = total_files // 8
+        # Calculate sizes for each eighth
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        fourth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 3 else 0)
+        fifth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 4 else 0)
+        start_idx = first_eighth_size + second_eighth_size + third_eighth_size + fourth_eighth_size
+        end_idx = start_idx + fifth_eighth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+        if verbose:
+            print(f"  Loading fifth eighth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
+    elif file_subset == 'sixth_eighth':
+        # Load sixth eighth of files (files 24-27 for 38 total)
+        num_files_per_eighth = total_files // 8
+        # Calculate sizes for each eighth
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        fourth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 3 else 0)
+        fifth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 4 else 0)
+        sixth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 5 else 0)
+        start_idx = first_eighth_size + second_eighth_size + third_eighth_size + fourth_eighth_size + fifth_eighth_size
+        end_idx = start_idx + sixth_eighth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+        if verbose:
+            print(f"  Loading sixth eighth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
+    elif file_subset == 'seventh_eighth':
+        # Load seventh eighth of files (files 28-32 for 38 total)
+        num_files_per_eighth = total_files // 8
+        # Calculate sizes for each eighth
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        fourth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 3 else 0)
+        fifth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 4 else 0)
+        sixth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 5 else 0)
+        seventh_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 6 else 0)
+        start_idx = first_eighth_size + second_eighth_size + third_eighth_size + fourth_eighth_size + fifth_eighth_size + sixth_eighth_size
+        end_idx = start_idx + seventh_eighth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+        if verbose:
+            print(f"  Loading seventh eighth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{end_idx-1})")
+    elif file_subset == 'eighth_eighth':
+        # Load eighth eighth of files (files 33-37 for 38 total)
+        num_files_per_eighth = total_files // 8
+        # Calculate where eighth eighth starts
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        fourth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 3 else 0)
+        fifth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 4 else 0)
+        sixth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 5 else 0)
+        seventh_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 6 else 0)
+        start_idx = first_eighth_size + second_eighth_size + third_eighth_size + fourth_eighth_size + fifth_eighth_size + sixth_eighth_size + seventh_eighth_size
         numpy_files = numpy_files[start_idx:]
         if verbose:
-            print(f"  Loading fourth fourth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{total_files-1})")
+            print(f"  Loading eighth eighth: {len(numpy_files)} of {total_files} files (indices {start_idx}-{total_files-1})")
     elif file_subset == 'all':
         # Load all files (default behavior)
         if verbose:
             print(f"  Loading all {len(numpy_files)} files")
     else:
-        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth'")
+        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_eighth', 'second_eighth', 'third_eighth', 'fourth_eighth', 'fifth_eighth', 'sixth_eighth', 'seventh_eighth', or 'eighth_eighth'")
     
     # Load selected files and concatenate
     all_arrays = []
@@ -365,8 +427,9 @@ def calculate_dataloader_stats(
         batch_size: Number of sequences per batch
         val_split: Fraction of data for validation 
         test_mode: Use subset for testing
-        file_subset: Which files to load ('all', 'first_fourth', 'second_fourth',
-                     'third_fourth', 'fourth_fourth')
+        file_subset: Which files to load ('all', 'first_eighth', 'second_eighth',
+                     'third_eighth', 'fourth_eighth', 'fifth_eighth', 'sixth_eighth',
+                     'seventh_eighth', 'eighth_eighth')
         dataset_source: Which dataset to use ('wikipedia' or 'fineweb')
         
     Returns:
@@ -408,35 +471,81 @@ def calculate_dataloader_stats(
     # Determine which files based on file_subset
     total_files = len(numpy_files)
     
-    if file_subset == 'first_fourth':
-        num_files_per_fourth = total_files // 4
-        if total_files % 4 > 0:
-            num_files_per_fourth += 1
-        numpy_files = numpy_files[:num_files_per_fourth]
-    elif file_subset == 'second_fourth':
-        num_files_per_fourth = total_files // 4
-        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
-        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
-        start_idx = first_fourth_size
-        end_idx = first_fourth_size + second_fourth_size
+    if file_subset == 'first_eighth':
+        num_files_per_eighth = total_files // 8
+        if total_files % 8 > 0:
+            num_files_per_eighth += 1
+        numpy_files = numpy_files[:num_files_per_eighth]
+    elif file_subset == 'second_eighth':
+        num_files_per_eighth = total_files // 8
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        start_idx = first_eighth_size
+        end_idx = first_eighth_size + second_eighth_size
         numpy_files = numpy_files[start_idx:end_idx]
-    elif file_subset == 'third_fourth':
-        num_files_per_fourth = total_files // 4
-        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
-        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
-        third_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 2 else 0)
-        start_idx = first_fourth_size + second_fourth_size
-        end_idx = first_fourth_size + second_fourth_size + third_fourth_size
+    elif file_subset == 'third_eighth':
+        num_files_per_eighth = total_files // 8
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        start_idx = first_eighth_size + second_eighth_size
+        end_idx = first_eighth_size + second_eighth_size + third_eighth_size
         numpy_files = numpy_files[start_idx:end_idx]
-    elif file_subset == 'fourth_fourth':
-        num_files_per_fourth = total_files // 4
-        first_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 0 else 0)
-        second_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 1 else 0)
-        third_fourth_size = num_files_per_fourth + (1 if total_files % 4 > 2 else 0)
-        start_idx = first_fourth_size + second_fourth_size + third_fourth_size
+    elif file_subset == 'fourth_eighth':
+        num_files_per_eighth = total_files // 8
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        fourth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 3 else 0)
+        start_idx = first_eighth_size + second_eighth_size + third_eighth_size
+        end_idx = first_eighth_size + second_eighth_size + third_eighth_size + fourth_eighth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+    elif file_subset == 'fifth_eighth':
+        num_files_per_eighth = total_files // 8
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        fourth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 3 else 0)
+        fifth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 4 else 0)
+        start_idx = first_eighth_size + second_eighth_size + third_eighth_size + fourth_eighth_size
+        end_idx = start_idx + fifth_eighth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+    elif file_subset == 'sixth_eighth':
+        num_files_per_eighth = total_files // 8
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        fourth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 3 else 0)
+        fifth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 4 else 0)
+        sixth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 5 else 0)
+        start_idx = first_eighth_size + second_eighth_size + third_eighth_size + fourth_eighth_size + fifth_eighth_size
+        end_idx = start_idx + sixth_eighth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+    elif file_subset == 'seventh_eighth':
+        num_files_per_eighth = total_files // 8
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        fourth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 3 else 0)
+        fifth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 4 else 0)
+        sixth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 5 else 0)
+        seventh_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 6 else 0)
+        start_idx = first_eighth_size + second_eighth_size + third_eighth_size + fourth_eighth_size + fifth_eighth_size + sixth_eighth_size
+        end_idx = start_idx + seventh_eighth_size
+        numpy_files = numpy_files[start_idx:end_idx]
+    elif file_subset == 'eighth_eighth':
+        num_files_per_eighth = total_files // 8
+        first_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 0 else 0)
+        second_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 1 else 0)
+        third_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 2 else 0)
+        fourth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 3 else 0)
+        fifth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 4 else 0)
+        sixth_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 5 else 0)
+        seventh_eighth_size = num_files_per_eighth + (1 if total_files % 8 > 6 else 0)
+        start_idx = first_eighth_size + second_eighth_size + third_eighth_size + fourth_eighth_size + fifth_eighth_size + sixth_eighth_size + seventh_eighth_size
         numpy_files = numpy_files[start_idx:]
     elif file_subset != 'all':
-        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_fourth', 'second_fourth', 'third_fourth', or 'fourth_fourth'")
+        raise ValueError(f"Invalid file_subset: {file_subset}. Must be 'all', 'first_eighth', 'second_eighth', 'third_eighth', 'fourth_eighth', 'fifth_eighth', 'sixth_eighth', 'seventh_eighth', or 'eighth_eighth'")
     
     # Calculate total sequences by checking file shapes
     # We can get this from the metadata or by quickly checking file shapes

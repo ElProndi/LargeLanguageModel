@@ -4,7 +4,7 @@
 import json
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
@@ -20,6 +20,10 @@ from rouge_score import rouge_scorer
 # For downloading datasets
 import urllib.request
 import random
+
+# Import model loading utilities from Inference
+from model import TransformerLM
+from tokenizer import WikipediaTokenizer
 
 
 class BenchmarkDatasets:
@@ -43,7 +47,9 @@ class BenchmarkDatasets:
                 return data[:max_samples]
         
         print("Downloading WikiText-103 test set...")
-        url = "https://raw.githubusercontent.com/pytorch/fairseq/master/examples/language_model/wikitext-103/wiki.test.tokens"
+        # Note: Using WikiText-2 as a fallback since WikiText-103 raw URL is not available
+        # WikiText-2 is smaller but sufficient for benchmarking
+        url = "https://raw.githubusercontent.com/pytorch/examples/master/word_language_model/data/wikitext-2/test.txt"
         
         try:
             with urllib.request.urlopen(url) as response:
@@ -226,6 +232,171 @@ class BenchmarkDatasets:
             {"context": "The children were excited to go to the", "target": "park"}
         ] * (n // 5 + 1)
         return samples[:n]
+
+
+def _load_tokenizer() -> WikipediaTokenizer:
+    """Load or download the CodeLlama tokenizer.
+    
+    Returns:
+        Loaded WikipediaTokenizer instance
+    """
+    print("Loading tokenizer...")
+    tokenizer = WikipediaTokenizer()
+    tokenizer_path = Path("tokenizers/codellama_tokenizer")
+    
+    if tokenizer_path.exists():
+        try:
+            tokenizer.load(str(tokenizer_path))
+            print(f"CodeLlama tokenizer loaded from {tokenizer_path}")
+        except Exception as e:
+            print(f"Failed to load tokenizer from {tokenizer_path}: {e}")
+            raise
+    else:
+        print("CodeLlama tokenizer not found locally. Downloading from HuggingFace...")
+        tokenizer.train()  # Downloads the pre-trained tokenizer
+        tokenizer.save(str(tokenizer_path))
+        print(f"CodeLlama tokenizer downloaded and saved to {tokenizer_path}")
+    
+    return tokenizer
+
+
+def load_model_from_checkpoint(checkpoint_path: Union[str, Path], device: torch.device) -> Tuple[TransformerLM, WikipediaTokenizer]:
+    """Load model from checkpoint with proper architecture handling.
+    
+    Args:
+        checkpoint_path: Path to checkpoint file
+        device: Device to load model on
+    
+    Returns:
+        Tuple of (model, tokenizer)
+    """
+    checkpoint_path = Path(checkpoint_path)
+    
+    # Load checkpoint
+    print(f"Loading checkpoint from {checkpoint_path}...")
+    # Note: weights_only=False is safe here since we're loading our own trained checkpoints
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    
+    # Get config from checkpoint, fallback to file if not present
+    config = checkpoint.get('config')
+    if not config:
+        with open("config.json", 'r') as f:
+            config = json.load(f)
+    
+    # Extract model configuration
+    if 'models' in config:
+        model_size = checkpoint.get('model_size')
+        if not model_size:
+            available_sizes = list(config['models'].keys())
+            model_size = available_sizes[0]  # Use first available size
+        model_config = config['models'][model_size]
+    else:
+        model_config = config['model']
+    
+    tokenizer_config = config.get('tokenizer', {})
+    rope_config = config.get('rope', {})
+    architecture_features = config.get('architecture_features', {})
+    
+    # Extract actual intermediate_size from the checkpoint's state_dict
+    state_dict = checkpoint['model_state_dict']
+    intermediate_size = None
+    use_scaled_residuals = False
+    
+    # Check for FFN layer dimensions to determine actual intermediate_size
+    for key in state_dict.keys():
+        if 'ffn.w_fused.weight' in key:
+            # w_fused contains both gate and up projections
+            intermediate_size = state_dict[key].shape[0] // 2
+            break
+        elif 'ffn.w_gate.weight' in key:
+            # Old format: shape is [intermediate_size, hidden_size]
+            intermediate_size = state_dict[key].shape[0]
+            break
+    
+    # Check for residual scaling in checkpoint
+    use_scaled_residuals = any('residual_scale' in key for key in state_dict.keys())
+    
+    # Read Flash Attention setting from checkpoint config (required)
+    if 'use_flash_attention' not in architecture_features:
+        raise ValueError(
+            f"Missing 'use_flash_attention' in checkpoint's architecture_features. "
+            f"Available features: {list(architecture_features.keys())}"
+        )
+    
+    use_flash_attention_inference = architecture_features['use_flash_attention']
+    
+    # Disable KV caching when Flash Attention is enabled (they're mutually exclusive)
+    use_kv_cache = not use_flash_attention_inference
+    
+    # Log the settings being used
+    print(f"  Flash Attention: {'✓ Enabled' if use_flash_attention_inference else '✗ Disabled'}")
+    print(f"  KV Caching: {'✓ Enabled' if use_kv_cache else '✗ Disabled (Flash Attention active)'}")
+    print(f"  Compilation: ✗ Disabled (benchmark mode)")
+    
+    # Create model with all architecture parameters from config
+    model = TransformerLM(
+        vocab_size=model_config['vocab_size'],
+        hidden_size=model_config['hidden_size'],
+        num_layers=model_config['num_layers'],
+        num_heads=model_config['num_heads'],
+        # CRITICAL: Pass num_kv_heads to match trained model architecture
+        num_kv_heads=model_config.get('num_kv_heads', model_config['num_heads']),
+        # Pass detected or configured intermediate_size
+        intermediate_size=intermediate_size,  # Use detected size from checkpoint
+        max_position_embeddings=model_config['max_position_embeddings'],
+        # RoPE configuration
+        rope_theta=rope_config.get('theta', 10000.0),
+        rope_scaling=rope_config.get('scaling_factor', 1.0),
+        # Use detected residual scaling setting
+        use_scaled_residuals=use_scaled_residuals,
+        # Architecture features from config - CRITICAL for correct model reconstruction
+        use_gqa=architecture_features.get('use_gqa', True),
+        use_flash_attention=use_flash_attention_inference,  # Use inference-specific setting
+        tie_embeddings=architecture_features.get('tie_embeddings', True),
+        use_gradient_checkpointing=architecture_features.get('use_gradient_checkpointing', False),
+        # Disable dropout for inference
+        dropout=0.0,
+        attention_dropout=0.0,
+        layer_norm_eps=model_config['layer_norm_eps'],
+        initializer_range=model_config['initializer_range'],
+        use_cache=use_kv_cache,  # Disabled when Flash Attention is active
+        pad_token_id=tokenizer_config.get('pad_token_id', 2)  # Same as EOS token (CodeLlama convention)
+    )
+    
+    # Handle compiled model state dict (remove "_orig_mod." prefix if present)
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('_orig_mod.'):
+            new_state_dict[k[10:]] = v  # Remove "_orig_mod." prefix
+        else:
+            new_state_dict[k] = v
+    
+    # Load state dict and validate
+    try:
+        model.load_state_dict(new_state_dict, strict=True)
+    except RuntimeError as e:
+        if "size mismatch" in str(e):
+            raise RuntimeError(f"Model architecture doesn't match checkpoint: {e}")
+        else:
+            raise e
+    
+    model = model.to(device)
+    model.eval()
+    
+    # Skip torch.compile() in benchmark mode to avoid Flash Attention issues
+    # Benchmarking measures model quality, not inference speed
+    # print("  Compiling model with torch.compile()...")
+    # model = torch.compile(model)
+    # print("  Model compiled successfully")
+    
+    # Get model stats
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Model loaded: {total_params:,} parameters")
+    
+    # Load tokenizer (shared across all models)
+    tokenizer = _load_tokenizer()
+    
+    return model, tokenizer
 
 
 class ModelBenchmark:
@@ -476,9 +647,56 @@ class ModelBenchmark:
         
         return (correct / total * 100) if total > 0 else 0.0
     
+    def load_models_from_checkpoints(
+        self,
+        checkpoint_paths: Union[List[Union[str, Path]], Dict[str, Union[str, Path]]]
+    ) -> Dict[str, Tuple[TransformerLM, WikipediaTokenizer]]:
+        """
+        Load multiple models from checkpoint files.
+        
+        Args:
+            checkpoint_paths: Either a list of checkpoint paths or a dict mapping names to paths
+            
+        Returns:
+            Dictionary mapping model names to (model, tokenizer) tuples
+        """
+        models_dict = {}
+        
+        # Normalize input to dict format
+        if isinstance(checkpoint_paths, list):
+            # Create names from checkpoint filenames
+            checkpoint_dict = {Path(p).stem: p for p in checkpoint_paths}
+        else:
+            checkpoint_dict = checkpoint_paths
+        
+        print(f"\nLoading {len(checkpoint_dict)} models from checkpoints...")
+        print("=" * 60)
+        
+        for name, checkpoint_path in checkpoint_dict.items():
+            checkpoint_path = Path(checkpoint_path)
+            print(f"\nLoading: {name}")
+            print(f"  From: {checkpoint_path}")
+            
+            try:
+                model, tokenizer = load_model_from_checkpoint(checkpoint_path, self.device)
+                models_dict[name] = (model, tokenizer)
+                print(f"  ✓ Successfully loaded {name}")
+            except Exception as e:
+                print(f"  ✗ Failed to load {name}: {e}")
+                print(f"  Skipping this model...")
+        
+        print("\n" + "=" * 60)
+        print(f"Successfully loaded {len(models_dict)}/{len(checkpoint_dict)} models")
+        
+        if not models_dict:
+            raise ValueError("No models could be loaded successfully")
+        
+        return models_dict
+    
     def run_full_benchmark(
         self,
-        models_dict: Dict[str, Tuple[Any, Any]],
+        models_dict: Optional[Dict[str, Tuple[Any, Any]]] = None,
+        checkpoint_paths: Optional[Union[List[Union[str, Path]], Dict[str, Union[str, Path]]]] = None,
         benchmark_config: Optional[Dict] = None
     ) -> Dict[str, Dict[str, Any]]:
         """
@@ -486,11 +704,22 @@ class ModelBenchmark:
         
         Args:
             models_dict: Dictionary mapping model names to (model, tokenizer) tuples
+            checkpoint_paths: Paths to checkpoint files to load models from
             benchmark_config: Optional configuration for benchmarks
             
         Returns:
             Dictionary of results for each model
         """
+        # Validate inputs
+        if models_dict is None and checkpoint_paths is None:
+            raise ValueError("Either models_dict or checkpoint_paths must be provided")
+        
+        if models_dict is not None and checkpoint_paths is not None:
+            raise ValueError("Cannot provide both models_dict and checkpoint_paths")
+        
+        # Load models from checkpoints if needed
+        if checkpoint_paths is not None:
+            models_dict = self.load_models_from_checkpoints(checkpoint_paths)
         config = benchmark_config or {
             'wikitext_samples': 100,
             'lambada_samples': 50,
@@ -737,9 +966,102 @@ def save_benchmark_results(results: Dict[str, Dict[str, Any]], output_dir: str =
 
 
 if __name__ == "__main__":
-    print("Benchmark module loaded. Use through Inference.py or import for direct use.")
-    print("\nExample usage:")
-    print("  from benchmark import ModelBenchmark, format_benchmark_results")
-    print("  benchmark = ModelBenchmark()")
-    print("  results = benchmark.run_full_benchmark(models_dict)")
-    print("  print(format_benchmark_results(results))")
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Benchmark language models")
+    parser.add_argument(
+        "checkpoints",
+        nargs="*",
+        help="Checkpoint file paths to benchmark (if none provided, shows usage)"
+    )
+    parser.add_argument(
+        "--config",
+        choices=["quick", "standard", "comprehensive"],
+        default="quick",
+        help="Benchmark configuration (default: quick)"
+    )
+    parser.add_argument(
+        "--device",
+        choices=["cuda", "cpu"],
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to run benchmarks on"
+    )
+    
+    args = parser.parse_args()
+    
+    if not args.checkpoints:
+        print("Benchmark module - Modernized for direct checkpoint loading")
+        print("\n" + "=" * 60)
+        print("Usage Examples:")
+        print("=" * 60)
+        print("\n1. Benchmark a single checkpoint:")
+        print("   python benchmark.py checkpoints/checkpoint_best.pt")
+        print("\n2. Benchmark multiple checkpoints:")
+        print("   python benchmark.py checkpoints/checkpoint_*.pt")
+        print("\n3. Use different benchmark configurations:")
+        print("   python benchmark.py checkpoints/checkpoint_best.pt --config comprehensive")
+        print("\n4. From Python code:")
+        print("   from benchmark import ModelBenchmark")
+        print("   benchmark = ModelBenchmark()")
+        print("   ")
+        print("   # New way - load from checkpoints directly:")
+        print("   results = benchmark.run_full_benchmark(")
+        print("       checkpoint_paths=['checkpoint1.pt', 'checkpoint2.pt']")
+        print("   )")
+        print("   ")
+        print("   # Old way - with pre-loaded models (still supported):")
+        print("   results = benchmark.run_full_benchmark(models_dict)")
+        print("\n" + "=" * 60)
+    else:
+        # Run benchmark on provided checkpoints
+        print(f"\n{'=' * 60}")
+        print(f"Running {args.config} benchmark on {len(args.checkpoints)} checkpoint(s)")
+        print(f"Device: {args.device}")
+        print(f"{'=' * 60}")
+        
+        # Configure benchmark based on selected preset
+        configs = {
+            "quick": {
+                'wikitext_samples': 50,
+                'lambada_samples': 20,
+                'hellaswag_samples': 10,
+                'max_length': 512,
+                'max_new_tokens': 30
+            },
+            "standard": {
+                'wikitext_samples': 100,
+                'lambada_samples': 50,
+                'hellaswag_samples': 20,
+                'max_length': 512,
+                'max_new_tokens': 30
+            },
+            "comprehensive": {
+                'wikitext_samples': 200,
+                'lambada_samples': 100,
+                'hellaswag_samples': 40,
+                'max_length': 512,
+                'max_new_tokens': 30
+            }
+        }
+        
+        benchmark_config = configs[args.config]
+        
+        # Create benchmark instance
+        device = torch.device(args.device)
+        benchmark = ModelBenchmark(device)
+        
+        try:
+            # Run benchmarks
+            results = benchmark.run_full_benchmark(
+                checkpoint_paths=args.checkpoints,
+                benchmark_config=benchmark_config
+            )
+            
+            # Display and save results
+            print(format_benchmark_results(results))
+            save_benchmark_results(results)
+            
+        except Exception as e:
+            print(f"\nError running benchmark: {e}")
+            import traceback
+            traceback.print_exc()
