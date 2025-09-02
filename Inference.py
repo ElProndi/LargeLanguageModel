@@ -744,13 +744,88 @@ def calculate_generation_stats(generated_ids: List[int], input_ids: List[int], g
     }
 
 
+def stream_tokens(tokenizer: WikipediaTokenizer, token_generator) -> Tuple[str, Dict]:
+    """Stream tokens to console as they're generated.
+    
+    Args:
+        tokenizer: Tokenizer to decode tokens
+        token_generator: Generator that yields token IDs
+    
+    Returns:
+        Tuple of (complete text, statistics)
+    """
+    import sys
+    
+    generated_tokens = []
+    token_count = 0
+    start_time = time.time()
+    
+    # Track previously decoded text length for incremental decoding
+    previous_text_length = 0
+    
+    for item in token_generator:
+        # Check if this is the final statistics dict
+        if isinstance(item, dict) and item.get('complete'):
+            # Final statistics
+            generation_time = time.time() - start_time
+            stats = {
+                'tokens_generated': token_count,
+                'generation_time': generation_time,
+                'tokens_per_sec': token_count / generation_time if generation_time > 0 else 0
+            }
+            # Decode complete sequence if available
+            if 'full_sequence' in item:
+                full_text = tokenizer.decode(item['full_sequence'][0].tolist())
+            else:
+                # Fallback to accumulated tokens
+                full_text = tokenizer.decode(generated_tokens)
+            return full_text, stats
+        else:
+            # Regular token - add to our accumulated list
+            generated_tokens.append(item)
+            token_count += 1
+            
+            # Incremental decoding: decode the full sequence to get proper text
+            # This ensures spaces and special characters are properly reconstructed
+            full_decoded_text = tokenizer.decode(generated_tokens, skip_special_tokens=False)
+            
+            # Extract only the new portion of text that was added
+            new_text = full_decoded_text[previous_text_length:]
+            
+            # Print the new text portion and flush immediately for real-time display
+            if new_text:  # Only write if there's actual new text
+                sys.stdout.write(new_text)
+                sys.stdout.flush()
+                
+            # Update the previous text length for next iteration
+            previous_text_length = len(full_decoded_text)
+    
+    # If generator ended without sending stats (shouldn't happen)
+    generation_time = time.time() - start_time
+    stats = {
+        'tokens_generated': token_count,
+        'generation_time': generation_time,
+        'tokens_per_sec': token_count / generation_time if generation_time > 0 else 0
+    }
+    full_text = tokenizer.decode(generated_tokens) if generated_tokens else ""
+    return full_text, stats
+
+
 def generate_text_unified(
     models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]],
     prompt: str,
     device: torch.device,
+    stream: bool = True,
     **generation_params
 ) -> Union[str, Dict[str, Dict[str, any]]]:
-    """Unified text generation for single or multiple models.
+    """Unified text generation for single or multiple models with streaming support.
+    
+    Args:
+        models_dict: Dictionary of model name to (model, tokenizer) tuples
+        prompt: Text prompt to generate from
+        device: Device to run on
+        stream: Whether to stream tokens as they're generated
+        **generation_params: Generation parameters (max_length, temperature, etc.)
     
     Returns:
         str for single model, dict of results for multiple models
@@ -773,27 +848,49 @@ def generate_text_unified(
                 print_message("Encoding prompt...", "info")
             input_tensor, input_ids, special_tokens = encode_prompt(tokenizer, prompt, device)
             print_message(f"Input tokens: {len(input_ids)}", "info")
-            print_message("Generating...", "info")
             
-            # Generate
-            start_time = time.time()
-            with torch.no_grad():
-                generated_ids = model.generate(
+            if stream and hasattr(model, 'generate_stream'):
+                # Streaming generation
+                print_message("Generating (streaming)...", "info")
+                print(f"\n{Colors.GREEN}Generated Text:{Colors.ENDC}\n{prompt}", end="")
+                
+                # Create generator
+                token_generator = model.generate_stream(
                     input_tensor,
                     eos_token_id=special_tokens['eos_token_id'],
                     **generation_params
                 )
-            generation_time = time.time() - start_time
-            
-            # Decode and calculate stats
-            generated_ids = generated_ids[0].tolist()
-            generated_text = tokenizer.decode(generated_ids)
-            stats = calculate_generation_stats(generated_ids, input_ids, generation_time)
-            
-            print_message("Generation complete!", "success")
-            print_message(f"Tokens generated: {stats['tokens_generated']}", "info")
-            print_message(f"Time taken: {stats['generation_time']:.2f}s", "info")
-            print_message(f"Speed: {stats['tokens_per_sec']:.1f} tokens/sec", "info")
+                
+                # Stream tokens and get final text
+                generated_text, stats = stream_tokens(tokenizer, token_generator)
+                
+                print()  # New line after streaming
+                print_message("\nGeneration complete!", "success")
+                print_message(f"Tokens generated: {stats['tokens_generated']}", "info")
+                print_message(f"Time taken: {stats['generation_time']:.2f}s", "info")
+                print_message(f"Speed: {stats['tokens_per_sec']:.1f} tokens/sec", "info")
+                
+            else:
+                # Non-streaming generation (fallback)
+                print_message("Generating...", "info")
+                start_time = time.time()
+                with torch.no_grad():
+                    generated_ids = model.generate(
+                        input_tensor,
+                        eos_token_id=special_tokens['eos_token_id'],
+                        **generation_params
+                    )
+                generation_time = time.time() - start_time
+                
+                # Decode and calculate stats
+                generated_ids = generated_ids[0].tolist()
+                generated_text = tokenizer.decode(generated_ids)
+                stats = calculate_generation_stats(generated_ids, input_ids, generation_time)
+                
+                print_message("Generation complete!", "success")
+                print_message(f"Tokens generated: {stats['tokens_generated']}", "info")
+                print_message(f"Time taken: {stats['generation_time']:.2f}s", "info")
+                print_message(f"Speed: {stats['tokens_per_sec']:.1f} tokens/sec", "info")
             
             if single_model:
                 return generated_text
@@ -837,10 +934,125 @@ def get_general_knowledge_prompts() -> List[Tuple[str, str]]:
     return prompts
 
 
+def save_general_knowledge_results(
+    all_results: Dict[str, List[Dict[str, any]]],
+    metadata: Optional[Dict[str, Dict]] = None,
+    output_dir: str = "general_knowledge_results"
+) -> None:
+    """Save general knowledge evaluation results to file.
+    
+    Args:
+        all_results: Dictionary mapping model names to lists of result dicts
+        metadata: Optional model metadata
+        output_dir: Directory to save results in
+    """
+    from pathlib import Path
+    from datetime import datetime
+    import json
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Save full JSON results (untruncated)
+    json_filename = output_path / f"general_knowledge_{timestamp}.json"
+    full_results = {
+        'timestamp': timestamp,
+        'models': list(all_results.keys()),
+        'metadata': metadata,
+        'results': all_results,
+        'summary': {}
+    }
+    
+    # Calculate summary statistics
+    for model_name, results_list in all_results.items():
+        successful = [r for r in results_list if not r.get('error', False)]
+        if successful:
+            full_results['summary'][model_name] = {
+                'success_rate': len(successful) / len(results_list),
+                'avg_tokens': sum(r['tokens_generated'] for r in successful) / len(successful),
+                'avg_time': sum(r['generation_time'] for r in successful) / len(successful),
+                'total_tokens': sum(r['tokens_generated'] for r in successful)
+            }
+    
+    with open(json_filename, 'w') as f:
+        json.dump(full_results, f, indent=2)
+    
+    print_message(f"Full results saved to: {json_filename}", "info")
+    
+    # Save human-readable text version (full text, no truncation)
+    text_filename = output_path / f"general_knowledge_{timestamp}.txt"
+    with open(text_filename, 'w') as f:
+        f.write("=" * 80 + "\n")
+        f.write("GENERAL KNOWLEDGE EVALUATION - FULL RESULTS\n")
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write("=" * 80 + "\n\n")
+        
+        # Write model information
+        f.write("MODELS EVALUATED:\n")
+        f.write("-" * 80 + "\n")
+        for model_name in all_results.keys():
+            f.write(f"• {model_name}")
+            if metadata and model_name in metadata:
+                meta = metadata[model_name]
+                f.write(f" ({meta['params']:,} parameters, {meta['memory_mb']:.1f} MB)")
+            f.write("\n")
+        f.write("\n")
+        
+        # Write detailed results for each category (NO TRUNCATION)
+        f.write("DETAILED RESULTS BY CATEGORY:\n")
+        f.write("=" * 80 + "\n\n")
+        
+        # Group results by category
+        categories_seen = []
+        for results_list in all_results.values():
+            for result in results_list:
+                if result['category'] not in categories_seen:
+                    categories_seen.append(result['category'])
+        
+        for category in categories_seen:
+            f.write(f"CATEGORY: {category}\n")
+            f.write("-" * 80 + "\n")
+            
+            # Get the prompt for this category
+            prompt_text = next((r['prompt'] for r in all_results[list(all_results.keys())[0]] 
+                               if r['category'] == category), "")
+            if prompt_text:
+                f.write(f"Prompt: {prompt_text}\n\n")
+            
+            for model_name in all_results.keys():
+                result = next((r for r in all_results[model_name] if r['category'] == category), None)
+                if result:
+                    f.write(f"Model: {model_name}\n")
+                    if result.get('error', False):
+                        f.write("Result: [ERROR]\n")
+                    else:
+                        # Write FULL completion without any truncation
+                        f.write(f"Completion ({result['tokens_generated']} tokens in {result['generation_time']:.2f}s):\n")
+                        f.write(result['completion'] + "\n")
+                    f.write("\n")
+            f.write("\n")
+        
+        # Write summary statistics
+        f.write("=" * 80 + "\n")
+        f.write("SUMMARY STATISTICS:\n")
+        f.write("-" * 80 + "\n")
+        for model_name, stats in full_results['summary'].items():
+            f.write(f"\n{model_name}:\n")
+            f.write(f"  • Success Rate: {stats['success_rate']*100:.1f}%\n")
+            f.write(f"  • Average Tokens: {stats['avg_tokens']:.1f}\n")
+            f.write(f"  • Average Time: {stats['avg_time']:.2f}s\n")
+            f.write(f"  • Total Tokens: {stats['total_tokens']}\n")
+    
+    print_message(f"Text summary saved to: {text_filename}", "info")
+
+
 def display_results(results: Union[str, Dict[str, Dict[str, any]]], 
                    prompt: str, 
                    metadata: Optional[Dict[str, Dict]] = None,
-                   mode: str = "comparison"):
+                   mode: str = "comparison",
+                   already_streamed: bool = False):
     """Unified display function for all result types.
     
     Args:
@@ -848,13 +1060,16 @@ def display_results(results: Union[str, Dict[str, Dict[str, any]]],
         prompt: The prompt used
         metadata: Optional metadata
         mode: Display mode ("comparison", "general_knowledge")
+        already_streamed: Whether the text was already displayed via streaming
     """
     # Single model result
     if isinstance(results, str):
-        print(f"\n{Colors.GREEN}{Colors.BOLD}Generated Text:{Colors.ENDC}")
-        print("=" * 60)
-        print(results)
-        print("=" * 60)
+        if not already_streamed:
+            # Only display if not already streamed
+            print(f"\n{Colors.GREEN}{Colors.BOLD}Generated Text:{Colors.ENDC}")
+            print("=" * 60)
+            print(results)
+            print("=" * 60)
         return
     
     # Multi-model results
@@ -1027,23 +1242,26 @@ def cleanup_session(device: torch.device):
 
 
 
-def get_generation_params_interactive(defaults: Optional[Dict[str, any]] = None) -> Dict[str, any]:
+def get_generation_params_interactive(defaults: Optional[Dict[str, any]] = None, include_streaming: bool = True) -> Tuple[Dict[str, any], bool]:
     """Get generation parameters interactively from user.
     
     Args:
         defaults: Optional dictionary of default values to use
+        include_streaming: Whether to ask about streaming preference
     
     Returns:
-        Dictionary of generation parameters
+        Tuple of (generation parameters dict, streaming enabled bool)
     """
     if defaults is None:
-        defaults = {'max_length': 200, 'temperature': 0.8, 'top_k': 50, 'top_p': 0.95}
+        defaults = {'max_length': 200, 'temperature': 1, 'top_k': 50, 'top_p': 0.95}
     
     print(f"\n{Colors.BOLD}Configure Generation:{Colors.ENDC}")
     print("  1. Use default parameters")
     print("  2. Customize parameters")
     
     param_choice = input(f"\n{Colors.BOLD}Select (1-2): {Colors.ENDC}")
+    
+    use_streaming = True  # Default to streaming
     
     if param_choice == '2':
         print(f"\n{Colors.BOLD}Generation Parameters:{Colors.ENDC}")
@@ -1069,10 +1287,15 @@ def get_generation_params_interactive(defaults: Optional[Dict[str, any]] = None)
         params['top_p'] = float(top_p_input) if top_p_input else defaults['top_p']
         params['top_p'] = params['top_p'] if params['top_p'] < 1.0 else None
         
-        return params
+        # Streaming option
+        if include_streaming:
+            stream_input = input(f"  Enable streaming (y/n, default y): ").lower()
+            use_streaming = stream_input != 'n'
+        
+        return params, use_streaming
     else:
         print_message("Using default parameters", "info")
-        return defaults
+        return defaults, use_streaming
 
 
 
@@ -1115,15 +1338,22 @@ def run_generation_loop(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTok
             continue
         
         # Get generation parameters
-        defaults = {'max_length': 512 if is_multi else 200, 'temperature': 0.8, 'top_k': 50, 'top_p': 0.95}
-        generation_params = get_generation_params_interactive(defaults)
+        defaults = {'max_length': 512 if is_multi else 200, 'temperature': 1, 'top_k': 50, 'top_p': 0.95}
+        generation_params, use_streaming = get_generation_params_interactive(defaults)
         
         print(f"\n{Colors.BOLD}Generating...{Colors.ENDC}")
         print("-" * 60)
         
         try:
-            results = generate_text_unified(models_dict, prompt, device, **generation_params)
-            display_results(results, prompt, metadata)
+            # Use streaming based on user preference
+            results = generate_text_unified(models_dict, prompt, device, stream=use_streaming, **generation_params)
+            # For single model, the full text is already displayed via streaming
+            if isinstance(results, str):
+                # Single model - text was already streamed, just show separator
+                print("=" * 60)
+            else:
+                # Multi-model - show comparison results
+                display_results(results, prompt, metadata)
         except Exception as e:
             print_message(f"Generation failed: {e}", "error")
             import traceback
@@ -1143,16 +1373,19 @@ def run_benchmark(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer
     print(f"{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
     
     configs = [
-        ('Quick', {'wikitext_samples': 50, 'lambada_samples': 20, 'hellaswag_samples': 10,
-                   'max_length': 512, 'max_new_tokens': 30}),
-        ('Standard', {'wikitext_samples': 100, 'lambada_samples': 50, 'hellaswag_samples': 20,
-                      'max_length': 512, 'max_new_tokens': 30}),
-        ('Comprehensive', {'wikitext_samples': 200, 'lambada_samples': 100, 'hellaswag_samples': 40,
-                           'max_length': 512, 'max_new_tokens': 30})
+        ('Quick', {
+            'lambada_samples': 50
+        }),
+        ('Standard', {
+            'lambada_samples': 100
+        }),
+        ('Comprehensive', {
+            'lambada_samples': 200
+        })
     ]
     
-    config_items = [(f"{name} ({cfg['wikitext_samples']} samples)", cfg) for name, cfg in configs]
-    config = select_items_interactive(config_items, "Select Benchmark Configuration:")
+    config_items = [(f"{name} ({cfg['lambada_samples']} LAMBADA samples)", cfg) for name, cfg in configs]
+    config = select_items_interactive(config_items, "Select LAMBADA Benchmark Configuration:")
     
     if config is None:
         print_message("Benchmark cancelled.", "info")
@@ -1181,8 +1414,9 @@ def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, Wikip
     prompts = get_general_knowledge_prompts()
     print(f"\n{Colors.BOLD}Evaluating {len(prompts)} knowledge areas{Colors.ENDC}")
     
-    eval_defaults = {'max_length': 150, 'temperature': 0.7, 'top_k': 40, 'top_p': 0.9}
-    generation_params = get_generation_params_interactive(eval_defaults)
+    eval_defaults = {'max_length': 150, 'temperature': 1, 'top_k': 40, 'top_p': 0.9}
+    # For evaluation, disable streaming to avoid interfering with progress display
+    generation_params, _ = get_generation_params_interactive(eval_defaults, include_streaming=False)
     
     all_results = {}
     
@@ -1196,7 +1430,8 @@ def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, Wikip
         # Always call generate_text_unified with all models to get consistent dict results
         # This works for both single and multiple models
         try:
-            results = generate_text_unified(models_dict, prompt, device, **generation_params)
+            # Disable streaming for evaluation to avoid interfering with progress display
+            results = generate_text_unified(models_dict, prompt, device, stream=False, **generation_params)
             
             # Handle the return value based on whether it's a string (single model) or dict (multiple models)
             if isinstance(results, str):
@@ -1321,9 +1556,9 @@ def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, Wikip
                     print(f"\n  {Colors.RED}{model_name}: [ERROR]{Colors.ENDC}")
                 else:
                     completion = result['completion']
-                    # Truncate long completions for display
-                    if len(completion) > 150:
-                        completion = completion[:150] + "..."
+                    # Truncate long completions for display (increased from 150 to 500 for better visibility)
+                    if len(completion) > 500:
+                        completion = completion[:500] + "..."
                     print(f"\n  {Colors.BLUE}{model_name}:{Colors.ENDC}")
                     print(f"    {completion}")
                     print(f"    {Colors.CYAN}({result['tokens_generated']} tokens in {result['generation_time']:.2f}s){Colors.ENDC}")
@@ -1363,7 +1598,50 @@ def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, Wikip
             print(f"  • Most Productive: {most_productive[0]} ({most_productive[1]['avg_tokens']:.1f} tokens avg)")
     
     print(f"\n{Colors.GREEN}{'=' * 70}{Colors.ENDC}")
-    print_message("General knowledge evaluation completed!", "success")
+    
+    # Save results to file
+    print_message("\nSaving results to file...", "info")
+    save_general_knowledge_results(all_results, metadata)
+    
+    # Offer to display full untruncated results
+    print(f"\n{Colors.BOLD}Display Options:{Colors.ENDC}")
+    print("  1. Show full untruncated results (may be long)")
+    print("  2. Skip to completion")
+    
+    display_choice = input(f"\n{Colors.BOLD}Select (1-2): {Colors.ENDC}")
+    
+    if display_choice == '1':
+        print(f"\n{Colors.HEADER}{'=' * 70}{Colors.ENDC}")
+        print(f"{Colors.HEADER}{Colors.BOLD}FULL UNTRUNCATED RESULTS{Colors.ENDC}")
+        print(f"{Colors.HEADER}{'=' * 70}{Colors.ENDC}")
+        
+        for category in categories_seen:
+            print(f"\n{Colors.CYAN}{Colors.BOLD}CATEGORY: {category}{Colors.ENDC}")
+            print(f"{Colors.CYAN}{'─' * 70}{Colors.ENDC}")
+            
+            # Find the prompt for this category
+            prompt_text = next((r['prompt'] for r in all_results[list(all_results.keys())[0]] 
+                               if r['category'] == category), "")
+            if prompt_text:
+                print(f"Prompt: {prompt_text}\n")
+            
+            for model_name in all_results.keys():
+                result = next((r for r in all_results[model_name] if r['category'] == category), None)
+                if result:
+                    print(f"\n{Colors.BLUE}{Colors.BOLD}Model: {model_name}{Colors.ENDC}")
+                    if result.get('error', False):
+                        print(f"{Colors.RED}[ERROR]{Colors.ENDC}")
+                    else:
+                        # Display FULL completion without truncation
+                        print(f"Full Completion ({result['tokens_generated']} tokens, {result['generation_time']:.2f}s):")
+                        print(f"{Colors.GREEN}{'─' * 70}{Colors.ENDC}")
+                        print(result['completion'])
+                        print(f"{Colors.GREEN}{'─' * 70}{Colors.ENDC}")
+        
+        print(f"\n{Colors.HEADER}{'=' * 70}{Colors.ENDC}")
+        print_message("Full results displayed above. Also saved to file.", "info")
+    
+    print_message("\nGeneral knowledge evaluation completed!", "success")
 
 
 if __name__ == "__main__":

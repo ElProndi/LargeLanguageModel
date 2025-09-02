@@ -21,7 +21,7 @@ from utils import DualLogger, get_cosine_schedule_with_warmup, MetricsTracker
 from tokenizer import WikipediaTokenizer
 
 torch.backends.cuda.matmul.allow_tf32 = True
-torch.set_float32_matmul_precision('high')  # More aggressive TF32 for ~10-15% speedup
+torch.set_float32_matmul_precision('high')
 
 
 class Trainer:
@@ -72,7 +72,6 @@ class Trainer:
         # Setup device - CUDA is required
         if not torch.cuda.is_available():
             print("❌ CUDA is not available. GPU is required for training.")
-            print("Please ensure you have a CUDA-capable GPU and PyTorch with CUDA support installed.")
             sys.exit(1)
         
         self.device = torch.device('cuda')  # Always use CUDA

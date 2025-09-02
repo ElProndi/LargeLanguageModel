@@ -9,6 +9,7 @@ using native PyTorch modules for efficiency and simplicity.
 import json
 import math
 import os
+import time
 from typing import Optional, Union
 
 import torch
@@ -1059,6 +1060,147 @@ class TransformerLM(nn.Module):
                     break
         
         return generated
+    
+    def generate_stream(
+        self,
+        input_ids: torch.Tensor,
+        max_length: int = 100,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        eos_token_id: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+        use_cache: Optional[bool] = None
+    ):
+        """
+        Generate text autoregressively with streaming output.
+        Yields tokens one at a time as they're generated.
+        
+        Args:
+            input_ids: Starting token IDs (batch_size, seq_len)
+            max_length: Maximum length to generate
+            temperature: Sampling temperature
+            top_k: Top-k sampling parameter
+            top_p: Top-p (nucleus) sampling parameter
+            eos_token_id: End of sequence token ID
+            pad_token_id: Padding token ID
+            use_cache: Whether to use KV caching for speedup (recommended)
+            
+        Yields:
+            Individual token IDs as they're generated
+            Final yield is a dict with generation statistics
+        """
+        self.eval()
+        pad_token_id = pad_token_id or self.config['pad_token_id']
+        eos_token_id = eos_token_id or self.config.get('eos_token_id', 2)
+        
+        # Use model's configured use_cache setting if not explicitly overridden
+        if use_cache is None:
+            use_cache = self.config.get('use_cache', True)
+            # Double-check: If Flash Attention is enabled, KV caching must be disabled
+            if self.config.get('use_flash_attention', False) and use_cache:
+                use_cache = False
+        
+        # Initialize with input
+        generated = input_ids
+        batch_size = input_ids.shape[0]
+        
+        # Track which sequences are done
+        unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
+        
+        # Initialize KV cache (will be populated on first forward pass)
+        past_key_values = None
+        
+        # Track statistics
+        tokens_generated = 0
+        start_time = time.time()
+        
+        # Use bfloat16 autocast for generation (matches training precision)
+        with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
+            while generated.shape[1] < max_length:
+                # Prepare model inputs
+                if past_key_values is None:
+                    # First iteration: process all input tokens
+                    model_inputs = generated
+                else:
+                    # Subsequent iterations: only process the last generated token
+                    model_inputs = generated[:, -1:]
+                
+                # Forward pass with KV caching
+                outputs = self.forward(
+                    model_inputs, 
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    return_dict=True
+                )
+                assert isinstance(outputs, dict)
+                
+                # Extract logits for the last position
+                next_token_logits = outputs['logits'][:, -1, :]
+                
+                # Update KV cache for next iteration
+                if use_cache:
+                    past_key_values = outputs.get('past_key_values')
+                
+                # Apply temperature
+                if temperature != 1.0:
+                    next_token_logits = next_token_logits / temperature
+                
+                # Apply top-k filtering
+                if top_k is not None and top_k > 0:
+                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                    next_token_logits[indices_to_remove] = float('-inf')
+                
+                # Apply top-p (nucleus) filtering
+                if top_p is not None and top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    
+                    # Remove tokens with cumulative probability above threshold
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    # Keep at least one token
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    
+                    # Scatter back to original indexing
+                    indices_to_remove = sorted_indices_to_remove.scatter(
+                        1, sorted_indices, sorted_indices_to_remove
+                    )
+                    next_token_logits[indices_to_remove] = float('-inf')
+                
+                # Sample next tokens
+                probs = F.softmax(next_token_logits, dim=-1)
+                next_tokens = torch.multinomial(probs, num_samples=1)
+                
+                # Update tokens for unfinished sequences
+                next_tokens = next_tokens * unfinished_sequences.unsqueeze(-1)
+                # Use padding for finished sequences
+                next_tokens = next_tokens + pad_token_id * (1 - unfinished_sequences).unsqueeze(-1)
+                
+                # Append to generated sequence
+                generated = torch.cat([generated, next_tokens], dim=-1)
+                
+                # Yield the new token (only for batch index 0 for simplicity)
+                if unfinished_sequences[0] == 1:  # Only yield if sequence 0 is not finished
+                    yield next_tokens[0, 0].item()
+                    tokens_generated += 1
+                
+                # Update which sequences are finished
+                unfinished_sequences = unfinished_sequences * (next_tokens.squeeze(-1) != eos_token_id).long()
+                
+                # Stop if all sequences are done
+                if unfinished_sequences.sum() == 0:
+                    break
+        
+        # Final yield with statistics
+        generation_time = time.time() - start_time
+        yield {
+            'complete': True,
+            'tokens_generated': tokens_generated,
+            'generation_time': generation_time,
+            'tokens_per_sec': tokens_generated / generation_time if generation_time > 0 else 0,
+            'full_sequence': generated
+        }
     
     def clear_cache(self) -> None:
         """
