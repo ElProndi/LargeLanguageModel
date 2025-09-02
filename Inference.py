@@ -1150,20 +1150,21 @@ def main():
     print("  2. Multi-model comparison")
     print("  3. Benchmark models")
     print("  4. General knowledge evaluation")
+    print("  5. Chat mode (conversational interface)")
     print("  0. Exit")
     
     while True:
         try:
-            mode_choice = input(f"\n{Colors.BOLD}Select mode (0-4): {Colors.ENDC}")
+            mode_choice = input(f"\n{Colors.BOLD}Select mode (0-5): {Colors.ENDC}")
             mode_choice = int(mode_choice)
             
             if mode_choice == 0:
                 print_message("Exiting...", "info")
                 sys.exit(0)
-            elif mode_choice in [1, 2, 3, 4]:
+            elif mode_choice in [1, 2, 3, 4, 5]:
                 break
             else:
-                print_message("Please enter 0, 1, 2, 3, or 4", "warning")
+                print_message("Please enter 0, 1, 2, 3, 4, or 5", "warning")
         except ValueError:
             print_message("Invalid input. Please enter a number.", "warning")
     
@@ -1222,6 +1223,28 @@ def main():
             
             models_dict, metadata = result
             run_general_knowledge_eval(models_dict, device, metadata)
+        
+        elif mode_choice == 5:
+            # Chat mode
+            print(f"\n{Colors.BOLD}Model Selection for Chat Mode{Colors.ENDC}")
+            print("  1. Single model chat")
+            print("  2. Multi-model chat comparison")
+            
+            chat_choice = None
+            while chat_choice not in [1, 2]:
+                try:
+                    chat_choice = int(input(f"\n{Colors.BOLD}Select (1-2): {Colors.ENDC}"))
+                    if chat_choice not in [1, 2]:
+                        print_message("Please enter 1 or 2", "warning")
+                except ValueError:
+                    print_message("Invalid input. Please enter a number.", "warning")
+            
+            result = load_models_for_inference(base_checkpoint_dir, device, multi_model=(chat_choice == 2))
+            if result is None:
+                sys.exit(0)
+            
+            models_dict, metadata = result
+            run_chat_mode(models_dict, device, metadata)
     
     except KeyboardInterrupt:
         print_message("\nInterrupted by user", "warning")
@@ -1642,6 +1665,180 @@ def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, Wikip
         print_message("Full results displayed above. Also saved to file.", "info")
     
     print_message("\nGeneral knowledge evaluation completed!", "success")
+
+
+def run_chat_mode(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], 
+                  device: torch.device, 
+                  metadata: Optional[Dict] = None):
+    """Run interactive chat mode with conversation history.
+    
+    This mode maintains conversation context and formats messages with
+    "User: " and "Assistant: " prefixes for proper chat-style interaction.
+    """
+    is_multi = len(models_dict) > 1
+    session_type = "multi-model chat" if is_multi else "chat"
+    
+    print(f"\n{Colors.CYAN}{'=' * 70}{Colors.ENDC}")
+    print(f"{Colors.CYAN}{Colors.BOLD}Starting {session_type} mode...{Colors.ENDC}")
+    print(f"{Colors.CYAN}{'=' * 70}{Colors.ENDC}")
+    
+    print_message("Chat Mode Instructions:", "info")
+    print("  • Type your message to chat with the model")
+    print("  • Type '/clear' to reset the conversation")
+    print("  • Type '/history' to view conversation history")
+    print("  • Type '/quit' or 'q' to exit chat mode")
+    print("")
+    
+    if is_multi:
+        print_message(f"Multi-model chat with {len(models_dict)} models", "info")
+        print_message("Each model maintains its own conversation history", "info")
+    
+    # Initialize conversation history for each model
+    conversations = {model_name: [] for model_name in models_dict.keys()}
+    
+    # Get generation parameters once for the session
+    print(f"\n{Colors.BOLD}Configure Chat Generation Parameters:{Colors.ENDC}")
+    defaults = {'max_length': 512, 'temperature': 0.8, 'top_k': 40, 'top_p': 0.9}
+    generation_params, use_streaming = get_generation_params_interactive(defaults)
+    
+    while True:
+        print(f"\n{Colors.BOLD}You: {Colors.ENDC}", end="")
+        user_input = input()
+        
+        # Handle special commands
+        if user_input.lower() in ['/quit', 'q']:
+            print_message("Exiting chat mode...", "info")
+            break
+        
+        if user_input.lower() == '/clear':
+            conversations = {model_name: [] for model_name in models_dict.keys()}
+            print_message("Conversation history cleared!", "success")
+            continue
+        
+        if user_input.lower() == '/history':
+            if is_multi:
+                for model_name, history in conversations.items():
+                    print(f"\n{Colors.BLUE}{Colors.BOLD}History for {model_name}:{Colors.ENDC}")
+                    if history:
+                        for turn in history:
+                            print(f"  {turn}")
+                    else:
+                        print("  (No conversation history yet)")
+            else:
+                model_name = list(models_dict.keys())[0]
+                history = conversations[model_name]
+                print(f"\n{Colors.BLUE}{Colors.BOLD}Conversation History:{Colors.ENDC}")
+                if history:
+                    for turn in history:
+                        print(turn)
+                else:
+                    print("(No conversation history yet)")
+            continue
+        
+        if not user_input.strip():
+            print_message("Empty message. Please try again.", "warning")
+            continue
+        
+        # Format the user message with "User: " prefix
+        formatted_user_msg = f"User: {user_input}"
+        
+        # Generate responses for each model
+        for model_idx, (model_name, (model, tokenizer)) in enumerate(models_dict.items(), 1):
+            if is_multi:
+                print(f"\n{Colors.BLUE}{Colors.BOLD}[{model_idx}/{len(models_dict)}] {model_name}:{Colors.ENDC}")
+            else:
+                print(f"{Colors.GREEN}{Colors.BOLD}Assistant: {Colors.ENDC}", end="")
+            
+            try:
+                # Build the full conversation context
+                conversation_history = conversations[model_name]
+                
+                # Construct the prompt with conversation history
+                # Start with BOS token (handled by tokenizer)
+                full_prompt = ""
+                
+                # Add all previous turns
+                for turn in conversation_history:
+                    full_prompt += turn + "\n"
+                
+                # Add current user message
+                full_prompt += formatted_user_msg + "\n"
+                
+                # Add Assistant prefix to trigger response
+                full_prompt += "Assistant: "
+                
+                # Get special tokens
+                special_tokens = tokenizer.get_special_token_ids()
+                bos_id = special_tokens['bos_token_id']
+                eos_id = special_tokens['eos_token_id']
+                
+                # Encode the full prompt (tokenizer will add BOS automatically)
+                input_ids = tokenizer.encode(full_prompt, add_special_tokens=True)
+                
+                # Check if we're approaching context limit
+                if len(input_ids) > 450:  # Leave room for response
+                    print_message("\nContext getting long. Consider /clear to reset.", "warning")
+                
+                # Convert to tensor
+                input_tensor = torch.tensor(input_ids, dtype=torch.long, device=device).unsqueeze(0)
+                
+                if use_streaming and hasattr(model, 'generate_stream'):
+                    # Streaming generation
+                    token_generator = model.generate_stream(
+                        input_tensor,
+                        eos_token_id=eos_id,
+                        **generation_params
+                    )
+                    
+                    # Stream tokens and collect the response
+                    generated_text, stats = stream_tokens(tokenizer, token_generator)
+                    
+                    # Extract just the assistant's response
+                    # The generated_text includes the full prompt + response
+                    assistant_response = generated_text[len(full_prompt):]
+                    
+                else:
+                    # Non-streaming generation
+                    with torch.no_grad():
+                        generated_ids = model.generate(
+                            input_tensor,
+                            eos_token_id=eos_id,
+                            **generation_params
+                        )
+                    
+                    # Decode the full sequence
+                    generated_text = tokenizer.decode(generated_ids[0].tolist())
+                    
+                    # Extract just the assistant's response
+                    assistant_response = generated_text[len(full_prompt):]
+                    
+                    # Print the response if not streaming
+                    print(assistant_response)
+                
+                # Clean up the response (remove any trailing special tokens)
+                assistant_response = assistant_response.replace('</s>', '').strip()
+                
+                # Update conversation history
+                conversations[model_name].append(formatted_user_msg)
+                conversations[model_name].append(f"Assistant: {assistant_response}")
+                
+                if is_multi:
+                    # Show token count for multi-model mode
+                    tokens_generated = len(tokenizer.encode(assistant_response, add_special_tokens=False))
+                    print(f"\n{Colors.CYAN}  ({tokens_generated} tokens generated){Colors.ENDC}")
+                else:
+                    print()  # New line after response
+                
+            except Exception as e:
+                print_message(f"\nError generating response: {e}", "error")
+                if is_multi:
+                    print_message(f"Continuing with other models...", "warning")
+                else:
+                    print_message("Try again or use /clear to reset", "info")
+        
+        # Separator between turns
+        if is_multi:
+            print(f"{Colors.CYAN}{'─' * 70}{Colors.ENDC}")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,8 @@ LargeLanguageModel/
 ├── model.py               # Transformer language model architecture
 ├── train.py               # Main training loop with mixed precision
 ├── Inference.py           # Interactive text generation from checkpoints
+├── lima_tokenizer.py      # LIMA dataset preparation for instruction tuning
+├── post_training.py       # Supervised fine-tuning (SFT) script
 ├── utils/                 # Training utilities
 │   ├── __init__.py        # Package initialization
 │   ├── logging_utils.py   # Dual logging (TensorBoard + JSON)
@@ -39,6 +41,11 @@ LargeLanguageModel/
 │   │   ├── checkpoint_latest.pt    # Most recent checkpoint
 │   │   ├── checkpoint_best.pt      # Best validation loss
 │   │   └── checkpoint_step_*.pt    # Step-based checkpoints
+│   ├── sft_lima_*/        # SFT checkpoints from instruction tuning
+│   │   ├── checkpoint_best.pt      # Best validation loss
+│   │   ├── checkpoint_latest.pt    # Most recent checkpoint
+│   │   ├── checkpoint_epoch_*.pt   # Per-epoch checkpoints
+│   │   └── sft_config.json        # Fine-tuning configuration
 │   └── [legacy flat structure]     # Old format: checkpoints directly in base dir
 └── logs/                  # Training logs
     ├── tensorboard/       # TensorBoard event files
@@ -55,6 +62,11 @@ Desktop/
 │   │       └── *.jsonl     # 38 Wikipedia dump files (50GB+)
 │   ├── cleaned_articles/   # Processed text (Unicode preserved)
 │   │   └── cleaned_*.txt   # One article per line format
+│   ├── post-training/      # Instruction tuning datasets
+│   │   ├── lima_train.jsonl         # Original LIMA dataset
+│   │   ├── tokenized_examples.npy   # Tokenized LIMA sequences
+│   │   ├── metadata.json            # Dataset statistics
+│   │   └── example_conversations.json # Sample formatted conversations
 │   └── tokenized_datasets/ # Tokenized sequences for training
 │       ├── codellama_test_dataset/  # Wikipedia test mode output
 │       │   ├── tokens_*.npy         # NumPy arrays of token sequences
@@ -386,9 +398,66 @@ Desktop/
 - **Top-k Accuracy**: Percentage where correct token is in top-k predictions
 - **Commonsense**: Percentage of correctly chosen completions
 
+### Phase 11: Post-Training - Instruction Tuning (lima_tokenizer.py, post_training.py)
+**Purpose**: Transform pretrained language models into instruction-following chatbots through supervised fine-tuning (SFT) on high-quality conversation data
+
+**Key Features**:
+- **LIMA Dataset Integration**:
+  - High-quality instruction dataset (1,030 carefully curated examples)
+  - Diverse sources: StackExchange, WikiHow, manual authoring
+  - 97% single-turn, 3% multi-turn conversations
+  - Quality over quantity approach for effective fine-tuning
+- **Chat Template Formatting**:
+  - Role-based conversation structure with "User:" and "Assistant:" markers
+  - Proper BOS/EOS token placement for each conversation turn
+  - Multi-turn support with clear conversation boundaries
+- **Efficient SFT Training**:
+  - Lower learning rates (5e-5) to prevent catastrophic forgetting
+  - Full dataset loaded to GPU memory (only ~0.5MB tokenized)
+  - Architecture verification from pretrained checkpoints
+  - Separate checkpoint directory for fine-tuned models
+
+**Components**:
+1. **lima_tokenizer.py**: Prepares LIMA dataset for training
+   - Downloads and processes LIMA from HuggingFace
+   - Formats conversations with role markers and special tokens
+   - Filters examples by length (max 512 tokens)
+   - Saves tokenized sequences as NumPy arrays
+
+2. **post_training.py**: Supervised fine-tuning script
+   - Loads pretrained checkpoints with architecture verification
+   - Implements instruction-specific training loop
+   - Tracks validation loss and generates samples
+   - Saves SFT checkpoints with full configuration
+
+**Input**: 
+- lima_tokenizer.py: Raw LIMA dataset from HuggingFace
+- post_training.py: Pretrained model checkpoint + tokenized LIMA data
+
+**Output**: 
+- lima_tokenizer.py: `data/post-training/tokenized_examples.npy`
+- post_training.py: `checkpoints/sft_lima_*/checkpoint_best.pt`
+
+**Processing Characteristics**:
+- Tokenization: 542/1030 examples kept (512 token limit)
+- Training: ~60 steps per epoch with batch size 8
+- Memory: Entire dataset fits in GPU memory
+- Speed: Full epoch in ~1 minute on modern GPU
+- Validation: Every 20% of epoch with sample generation
+
+**Chat Format Example**:
+```
+<s>User: How do I implement a binary search tree in Python?
+Assistant: Here's a complete implementation of a binary search tree in Python:
+
+[Implementation details...]</s>
+<s>User: Can you add a method to find the height?
+Assistant: [Height method implementation...]</s>
+```
+
 ### Upcoming Phases (To Be Implemented)
 
-**Phase 10: Inference Server**
+**Phase 12: Inference Server**
 - REST API for text generation
 - Streaming generation support
 - Model quantization for deployment
@@ -643,6 +712,49 @@ ls -la benchmark_results/
 cat benchmark_results/benchmark_*.txt
 ```
 
+### Post-Training: Instruction Tuning
+
+#### Preparing LIMA Dataset
+```bash
+# Download and tokenize LIMA dataset
+python3 lima_tokenizer.py
+
+# Custom parameters
+python3 lima_tokenizer.py --max-length 1024 --batch-size 50
+
+# Output location: /home/andrea/Desktop/data/post-training/
+# Files created:
+# - tokenized_examples.npy (tokenized sequences)
+# - metadata.json (dataset statistics)
+# - example_conversations.json (sample formatted conversations)
+```
+
+#### Running Supervised Fine-Tuning
+```bash
+# Basic SFT with pretrained checkpoint
+python3 post_training.py --checkpoint checkpoints/110M_FINE_COMPLETE/110MPre-Trained.pt
+
+# Custom training parameters
+python3 post_training.py \
+    --checkpoint checkpoints/110M_FINE_COMPLETE/110MPre-Trained.pt \
+    --epochs 2 \
+    --lr 3e-5 \
+    --batch-size 4 \
+    --name my_sft_experiment
+
+# Quick test with smaller batch
+python3 post_training.py \
+    --checkpoint checkpoints/110M_FINE_COMPLETE/110MPre-Trained.pt \
+    --batch-size 2 \
+    --epochs 1
+
+# Output: checkpoints/sft_lima_[timestamp]/
+# - checkpoint_best.pt (best validation loss)
+# - checkpoint_latest.pt (most recent)
+# - checkpoint_epoch_*.pt (per-epoch saves)
+# - sft_config.json (training configuration)
+```
+
 ### Running Inference
 ```bash
 # Run interactive inference with trained model
@@ -683,6 +795,7 @@ python3 Inference.py
 # - Supports backward compatibility with old flat checkpoint structure
 # - Color coding: GREEN for best checkpoint, BLUE for latest
 # - Memory warnings appear when loading multiple large models
+# - Works with both pretrained and SFT checkpoints (e.g., checkpoints/sft_lima_*/checkpoint_best.pt)
 ```
 
 ## Configuration System
