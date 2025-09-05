@@ -26,7 +26,7 @@ def _get_data_directory(test_mode: bool = False) -> Path:
     Returns:
         Path to the full dataset directory
     """
-    base_path = Path("/home/andrea/Desktop/data/tokenized_datasets")
+    base_path = Path("data/tokenized_datasets")
     data_dir = base_path / "fineweb_full_dataset"
     
     return data_dir

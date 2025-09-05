@@ -11,6 +11,7 @@ logs/
 checkpoints/
 benchmark_cache/
 benchmark_results/
+data/
 
 # Python egg files
 *.egg-info/

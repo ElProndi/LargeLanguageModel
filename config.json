@@ -71,17 +71,17 @@
   
   "dataset": {
     "source": "fineweb",
-    "fineweb_raw_dir": "/home/andrea/Desktop/data/raw/fineweb",
-    "fineweb_test_dir": "/home/andrea/Desktop/data/tokenized_datasets/fineweb_test_dataset",
-    "fineweb_full_dir": "/home/andrea/Desktop/data/tokenized_datasets/fineweb_full_dataset"
+    "fineweb_raw_dir": "data/raw/fineweb",
+    "fineweb_test_dir": "data/tokenized_datasets/fineweb_test_dataset",
+    "fineweb_full_dir": "data/tokenized_datasets/fineweb_full_dataset"
   },
   
   "paths": {
     "checkpoint_dir": "checkpoints",
     "log_dir": "logs",
     "tokenizer_dir": "tokenizers/codellama_tokenizer",
-    "raw_data_dir": "/home/andrea/Desktop/data/raw",
-    "dataset_dir": "/home/andrea/Desktop/data/tokenized_datasets/fineweb_full_dataset"
+    "raw_data_dir": "data/raw",
+    "dataset_dir": "data/tokenized_datasets/fineweb_full_dataset"
   },
   
   "pytorch_backend": {

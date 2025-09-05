@@ -3,8 +3,8 @@
 Transformer-based language model training pipeline using CodeLlama tokenizer and FineWeb dataset (277.4GB, 100B tokens from HuggingFace).
 
 ## Path Definitions
-- `$DATA`: `/home/andrea/Desktop/data`
-- `$PROJECT`: `/home/andrea/Desktop/LargeLanguageModel`
+- `$DATA`: `./data` (within project root)
+- `$PROJECT`: `.` (project root)
 
 ## Directory Structure
 
@@ -34,7 +34,7 @@ LargeLanguageModel/
 ├── checkpoints/                # Hierarchical: run_*/checkpoint_*.pt, sft_lima_*/
 └── logs/                       # tensorboard/, raw_metrics/
 
-$DATA/
+data/                           # (within project root)
 ├── raw/fineweb/               # JSONL chunks from download
 ├── post-training/             # LIMA tokenized data
 └── tokenized_datasets/        # fineweb_{test,full}_dataset/
@@ -51,11 +51,11 @@ $DATA/
 #### 2a. Download (src/dataset_preparation/fineweb_download.py)
 **Architecture**: N parallel workers + 1 writer, HF native sharding, zero inter-worker overhead  
 **Scale**: Test=2 chunks/200k docs | Full=100B tokens/148M docs/277GB  
-**Defaults**: 8 workers, 100k docs/chunk → `$DATA/raw/fineweb/`
+**Defaults**: 2 workers, 100k docs/chunk → `data/raw/fineweb/`
 
 #### 2b. Processing (src/dataset_preparation/fineweb_prep.py)  
 **Features**: Continuous packing (no gaps), BOS/EOS preservation, 2048-token windows  
-**Batching**: 700k docs/file (7 chunks) → `$DATA/tokenized_datasets/`
+**Batching**: 700k docs/file (7 chunks) → `data/tokenized_datasets/`
 
 ### 3. DataLoader (src/training/dataloader.py)
 **Memory**: 32-chunk division for efficient memory use, train on GPU (zero-copy), val on CPU (pinned)  
@@ -102,7 +102,7 @@ $DATA/
 
 #### LIMA Preparation (src/dataset_preparation/lima_tokenizer.py)
 **Dataset**: 1,030 curated examples (97% single-turn), 542 kept (<2048 tokens)  
-**Format**: `<s>User: {q}\nAssistant: {a}</s>` → `$DATA/post-training/`
+**Format**: `<s>User: {q}\nAssistant: {a}</s>` → `data/post-training/`
 
 #### Fine-Tuning (src/training/post_training.py)
 **Training**: LR=5e-5, batch=8, ~60 steps/epoch, GPU-resident  

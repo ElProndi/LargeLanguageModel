@@ -272,10 +272,10 @@ def main():
     """Main entry point for LIMA tokenization."""
     parser = argparse.ArgumentParser(description="Tokenize LIMA dataset for instruction fine-tuning")
     parser.add_argument("--input", type=str, 
-                       default="/home/andrea/Desktop/data/post-training/lima_train.jsonl",
+                       default="data/post-training/lima_train.jsonl",
                        help="Path to LIMA jsonl file")
     parser.add_argument("--output", type=str,
-                       default="/home/andrea/Desktop/data/post-training",
+                       default="data/post-training",
                        help="Output directory for tokenized data")
     parser.add_argument("--max-length", type=int, default=2048,
                        help="Maximum sequence length in tokens")

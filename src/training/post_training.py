@@ -207,7 +207,7 @@ class SFTTrainer:
         Returns:
             Tuple of (train_loader, val_loader, dataset_info)
         """
-        data_dir = Path("/home/andrea/Desktop/data/post-training")
+        data_dir = Path("data/post-training")
         
         # Load tokenized examples
         tokenized_path = data_dir / "tokenized_examples.npy"

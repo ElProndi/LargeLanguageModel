@@ -23,6 +23,7 @@ import json
 import time
 import signal
 import argparse
+import random
 import multiprocessing as mp
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
@@ -98,35 +99,47 @@ class DownloadWorker:
             docs_in_chunk = 0
             chunk_id = self.config.worker_id * 1000  # Unique chunk IDs per worker
             
+            # Process documents
             for doc_idx, example in enumerate(worker_dataset):
-                # Extract text
-                text = example.get('text', '')
-                if not text:
+                try:
+                    # Extract text
+                    text = example.get('text', '')
+                    if not text:
+                        continue  # Skip empty docs
+                    
+                    # Add to current chunk
+                    # Use worker_id and doc_idx to create unique document IDs
+                    chunk_docs.append({
+                        'id': f"w{self.config.worker_id}_d{doc_idx}",
+                        'text': text,
+                        'length': len(text)
+                    })
+                    docs_in_chunk += 1
+                    self.documents_processed += 1
+                    self.bytes_downloaded += len(text)
+                    
+                    # Send chunk when full
+                    if docs_in_chunk >= self.config.chunk_size:
+                        self.send_chunk(chunk_id, chunk_docs)
+                        
+                        # Reset for next chunk
+                        chunk_docs = []
+                        docs_in_chunk = 0
+                        chunk_id += 1
+                        
+                    # Send progress update every 1000 docs
+                    if self.documents_processed % 1000 == 0:
+                        self.send_progress()
+                    
+                except Exception as e:
+                    # Log error and skip the document
+                    self.progress_queue.put({
+                        'worker_id': self.config.worker_id,
+                        'status': f'Skipping doc {doc_idx} due to error: {e}',
+                        'documents': self.documents_processed,
+                        'bytes': self.bytes_downloaded
+                    })
                     continue
-                
-                # Add to current chunk
-                # Use worker_id and doc_idx to create unique document IDs
-                chunk_docs.append({
-                    'id': f"w{self.config.worker_id}_d{doc_idx}",
-                    'text': text,
-                    'length': len(text)
-                })
-                docs_in_chunk += 1
-                self.documents_processed += 1
-                self.bytes_downloaded += len(text)
-                
-                # Send chunk when full
-                if docs_in_chunk >= self.config.chunk_size:
-                    self.send_chunk(chunk_id, chunk_docs)
-                    
-                    # Reset for next chunk
-                    chunk_docs = []
-                    docs_in_chunk = 0
-                    chunk_id += 1
-                    
-                # Send progress update every 1000 docs
-                if self.documents_processed % 1000 == 0:
-                    self.send_progress()
             
             # Send remaining documents
             if chunk_docs:
@@ -314,8 +327,12 @@ class FineWebFastDownloader:
         writer_process = mp.Process(target=writer.run, args=(self.num_workers,))
         writer_process.start()
         
-        # Start worker processes
+        # Start worker processes with staggered startup to avoid rate limiting
         workers = []
+        startup_delay = 3.0  # Delay between worker startups (seconds)
+        
+        print(f"\nStarting {self.num_workers} workers with {startup_delay}s staggered startup...")
+        
         for i in range(self.num_workers):
             config = WorkerConfig(
                 worker_id=i,
@@ -331,6 +348,11 @@ class FineWebFastDownloader:
             
             docs_estimate = total_documents // self.num_workers
             print(f"Started worker {i}: processing ~{docs_estimate:,} documents (shard {i}/{self.num_workers})")
+            
+            # Stagger worker startup to prevent simultaneous API hits
+            if i < self.num_workers - 1:  # Don't delay after the last worker
+                print(f"  Waiting {startup_delay}s before starting next worker...")
+                time.sleep(startup_delay)
         
         # Monitor progress
         print("\nDownloading...")
@@ -349,21 +371,31 @@ class FineWebFastDownloader:
                     update = progress_queue.get_nowait()
                     worker_id = update['worker_id']
                     
+                    # Check if this is a status message (rate limiting, etc.)
+                    if 'status' in update:
+                        # Show status message in progress bar description
+                        pbar.set_description(f"Worker {worker_id}: {update['status']}")
+                    
                     # Update total counts
                     if worker_id in worker_status:
-                        old_docs = worker_status[worker_id]['documents']
-                        new_docs = update['documents']
-                        pbar.update(new_docs - old_docs)
-                        total_docs_downloaded += new_docs - old_docs
+                        old_docs = worker_status[worker_id].get('documents', 0)
+                        new_docs = update.get('documents', 0)
+                        if new_docs > old_docs:
+                            pbar.update(new_docs - old_docs)
+                            total_docs_downloaded += new_docs - old_docs
+                        
+                        # Recalculate total bytes
+                        worker_status[worker_id] = update
                         total_bytes_downloaded = sum(
-                            w['bytes'] for w in worker_status.values()
+                            w.get('bytes', 0) for w in worker_status.values()
                         )
                     else:
-                        pbar.update(update['documents'])
-                        total_docs_downloaded += update['documents']
-                        total_bytes_downloaded += update['bytes']
-                    
-                    worker_status[worker_id] = update
+                        docs = update.get('documents', 0)
+                        if docs > 0:
+                            pbar.update(docs)
+                            total_docs_downloaded += docs
+                            total_bytes_downloaded += update.get('bytes', 0)
+                        worker_status[worker_id] = update
                     
                     # Update progress bar
                     pbar.set_postfix({
@@ -405,8 +437,8 @@ def main():
     parser = argparse.ArgumentParser(description="Fast parallel FineWeb downloader")
     parser.add_argument("--test", action="store_true",
                        help="Test mode: download only two chunks")
-    parser.add_argument("--workers", type=int, default=8,
-                       help="Number of download workers (default: 8)")
+    parser.add_argument("--workers", type=int, default=2,
+                       help="Number of download workers (default: 2)")
     parser.add_argument("--chunk-size", type=int, default=100000,
                        help="Documents per chunk file (default: 100000)")
     parser.add_argument("--max-docs", type=int, default=None,
@@ -414,7 +446,7 @@ def main():
     parser.add_argument("--queue-size", type=int, default=100,
                        help="Maximum chunks in queue (default: 100)")
     parser.add_argument("--output", type=str, default=None,
-                       help="Output directory (default: /home/andrea/Desktop/data/raw/fineweb)")
+                       help="Output directory (default: data/raw/fineweb)")
     
     args = parser.parse_args()
     
@@ -422,7 +454,7 @@ def main():
     if args.output:
         output_dir = Path(args.output)
     else:
-        output_dir = Path("/home/andrea/Desktop/data/raw/fineweb")
+        output_dir = Path("data/raw/fineweb")
     
     # Create downloader
     downloader = FineWebFastDownloader(

@@ -563,7 +563,7 @@ def main():
     parser.add_argument("--test", action="store_true",
                        help="Test mode: process only one chunk file")
     parser.add_argument("--input", type=str, default=None,
-                       help="Input directory containing JSONL files (default: /home/andrea/Desktop/data/raw/fineweb)")
+                       help="Input directory containing JSONL files (default: data/raw/fineweb)")
     parser.add_argument("--output", type=str, default=None,
                        help="Output directory for tokenized files (default: auto-generated based on mode)")
     parser.add_argument("--window", type=int, default=2048,
@@ -577,13 +577,13 @@ def main():
     if args.input:
         input_dir = Path(args.input)
     else:
-        input_dir = Path("/home/andrea/Desktop/data/raw/fineweb")
+        input_dir = Path("data/raw/fineweb")
     
     # Set output directory
     if args.output:
         output_dir = Path(args.output)
     else:
-        data_dir = Path("/home/andrea/Desktop/data")
+        data_dir = Path("data")
         if args.test:
             output_dir = data_dir / "tokenized_datasets" / "fineweb_test_dataset"
         else:
