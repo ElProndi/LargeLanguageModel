@@ -7,11 +7,16 @@ to predict the final word in passages.
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Union
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
+
+# Add parent directory to path to allow imports when running directly
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import torch
 import numpy as np
@@ -21,8 +26,14 @@ from tqdm import tqdm
 import urllib.request
 
 # Import model loading utilities from Inference
-from src.utils.model import TransformerLM
-from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+try:
+    # Try relative imports (when imported as a module)
+    from ..utils.model import TransformerLM
+    from ..dataset_preparation.tokenizer import CodeLlamaTokenizer
+except ImportError:
+    # Fall back to absolute imports (when run directly)
+    from src.utils.model import TransformerLM
+    from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
 
 
 class BenchmarkDatasets:

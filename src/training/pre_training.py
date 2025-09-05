@@ -9,21 +9,35 @@ from collections import deque
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+# Add parent directory to path to allow imports when running directly
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 # Import project modules
-from src.utils.model import create_model
-from src.training.dataloader import create_simple_train_val_dataloaders, destroy_dataloaders, calculate_dataloader_stats
-from src.utils.logging_utils import DualLogger
-from src.utils.scheduler import get_cosine_schedule_with_warmup
-from src.utils.metrics import MetricsTracker
-from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+try:
+    # Try relative imports (when imported as a module)
+    from ..utils.model import create_model
+    from .dataloader import create_fixed_eval_dataloaders, destroy_dataloaders, calculate_fixed_eval_dataloader_stats
+    from ..utils.logging_utils import DualLogger
+    from ..utils.scheduler import get_cosine_schedule_with_warmup
+    from ..utils.metrics import MetricsTracker
+    from ..dataset_preparation.tokenizer import CodeLlamaTokenizer
+except ImportError:
+    # Fall back to absolute imports (when run directly)
+    from src.utils.model import create_model
+    from src.training.dataloader import create_fixed_eval_dataloaders, destroy_dataloaders, calculate_fixed_eval_dataloader_stats
+    from src.utils.logging_utils import DualLogger
+    from src.utils.scheduler import get_cosine_schedule_with_warmup
+    from src.utils.metrics import MetricsTracker
+    from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
 
 torch.backends.cuda.matmul.allow_tf32 = True
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision('medium')
 
 
 class Trainer:
@@ -35,24 +49,21 @@ class Trainer:
         model_size: str = None,
         test_mode: bool = False,
         resume_from: Optional[str] = None,
-        experiment_name: Optional[str] = None,
-        train_single_subset: bool = False
+        experiment_name: Optional[str] = None
     ):
         """Initialize trainer with configuration.
         
         Args:
             config_path: Path to configuration file
             model_size: Model size to use ("small" or "medium"). If None, uses default from config.
-            test_mode: Use smaller dataset for testing
+            test_mode: Train on 1 chunk (subset) out of 64 total chunks
             resume_from: Path to checkpoint to resume from
             experiment_name: Name for this training run
-            train_single_subset: If True, train on first subset only. If False (default), train on all subsets sequentially.
         """
         print(f"Initializing Transformer Language Model Trainer")
         
-        # Store model size and training mode
+        # Store model size
         self.model_size = model_size
-        self.train_single_subset = train_single_subset
         
         # Load configuration
         with open(config_path, 'r') as f:
@@ -65,7 +76,7 @@ class Trainer:
         
         self.test_mode = test_mode
         if test_mode:
-            print("🧪 Running in TEST MODE - using reduced dataset and steps")
+            print("🧪 Running in TEST MODE - training on 1 chunk out of 64 total chunks")
             # max_steps will be calculated dynamically based on test dataset size
             self.config['logging']['eval_steps'] = 50  # Not used anymore, validation_interval is used instead
             self.config['logging']['save_steps'] = 50   # Save checkpoint every 50 steps in test mode
@@ -109,9 +120,9 @@ class Trainer:
         
         # Initialize dataloader variables (will be created dynamically)
         self.train_loader = None
-        self.val_loader = None
+        self.eval_loader = None  # Fixed eval dataset loader (loaded once)
         self.train_dataset = None
-        self.val_dataset = None
+        self.eval_dataset = None  # Fixed eval dataset
         self.current_data_subset = None
         self.dataloader_info = None
         
@@ -134,14 +145,13 @@ class Trainer:
         print("Calculating training steps...", end='')
         
         # Configure number of data subsets (default to 32)
-        self.num_data_subsets = self.config['training'].get('num_data_subsets', 32)
+        self.num_data_subsets = self.config['training'].get('num_data_subsets', 64)
         
-        # Get statistics for all subsets
+        # Get statistics for all subsets using fixed eval mode
         subset_stats = []
         for subset_idx in range(self.num_data_subsets):
-            stats = calculate_dataloader_stats(
+            stats = calculate_fixed_eval_dataloader_stats(
                 batch_size=self.config['training']['batch_size'],
-                val_split=0.1,
                 test_mode=self.test_mode,
                 subset_index=subset_idx,
                 num_subsets=self.num_data_subsets
@@ -151,19 +161,19 @@ class Trainer:
         # Calculate batch counts and dynamic max_steps based on actual dataset size
         num_epochs = self.config['training'].get('num_epochs', 1)
         
-        if self.train_single_subset:
-            # Train on single subset only - calculate steps for first subset
+        if self.test_mode:
+            # Test mode - calculate steps for first subset only (1/32 of the data)
             self.batches_per_epoch = subset_stats[0]['train_batches']
             self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
             if self.batches_per_epoch % self.gradient_accumulation_steps != 0:
                 self.steps_per_epoch += 1
             
-            # Set max_steps for single subset with epochs
+            # Set max_steps for test mode with epochs
             self.max_steps = self.steps_per_epoch * num_epochs
             self.total_training_steps = self.max_steps
             
             if not resume_from:
-                print(f"  • Training on subset 1/{self.num_data_subsets} only: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
+                print(f"  • Training on subset 1/{self.num_data_subsets} only (1 chunk out of {self.num_data_subsets} total): {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
         else:
             # Train on all subsets sequentially - sum all subsets
             self.batches_per_epoch = sum(stats['train_batches'] for stats in subset_stats)
@@ -238,14 +248,17 @@ class Trainer:
         return model
     
     def _create_dataloaders(self, subset_index: int = 0, num_subsets: int = None) -> Tuple[DataLoader, DataLoader, Dict]:
-        """Create train and validation data loaders for specified subset.
+        """Create train and eval data loaders using fixed evaluation dataset.
+        
+        The eval dataset (tokens_0.npy) is loaded once on first call and reused.
+        Training datasets are loaded from tokens_1.npy onwards based on subset_index.
         
         Args:
-            subset_index: 0-based index of the subset to load
+            subset_index: 0-based index of the subset to load for training
             num_subsets: Total number of subsets (defaults to self.num_data_subsets)
         
         Returns:
-            Tuple of (train_loader, val_loader, info_dict)
+            Tuple of (train_loader, eval_loader, info_dict)
         """
         if num_subsets is None:
             num_subsets = self.num_data_subsets
@@ -253,30 +266,32 @@ class Trainer:
         subset_desc = f"subset {subset_index+1}/{num_subsets}"
         print(f"\nLoading data: {subset_desc}")
         
-        # Create dataloaders for the specified subset
-        train_loader, val_loader, info = create_simple_train_val_dataloaders(
+        # Create dataloaders with fixed eval dataset
+        train_loader, eval_loader, info = create_fixed_eval_dataloaders(
             batch_size=self.config['training']['batch_size'],
-            val_split=0.1,  # 10% validation split within subset
-            shuffle_train=True,
             test_mode=self.test_mode,
             verbose=True,
-            seed=42,  # Consistent split across runs
-            subset_index=subset_index,  # Load only specified subset
+            subset_index=subset_index,  # Load only specified subset for training
             num_subsets=num_subsets  # Total number of subsets
         )
         
         # Store references
         self.train_loader = train_loader
-        self.val_loader = val_loader
+        
+        # Only store eval loader on first load (it's the same for all subsets)
+        if self.eval_loader is None:
+            self.eval_loader = eval_loader
+            self.eval_dataset = info['eval_dataset']
+            print(f"Fixed eval dataset stored: {info['eval_size']:,} sequences")
+        
         self.train_dataset = info['train_dataset']
-        self.val_dataset = info['val_dataset']
         self.current_data_subset_index = subset_index
         self.dataloader_info = info
         
-        return train_loader, val_loader, info
+        return train_loader, self.eval_loader, info
     
     def _switch_data_subset(self, new_subset_index: int):
-        """Switch to a different data subset, destroying old dataloaders first.
+        """Switch to a different training data subset, keeping eval dataset intact.
         
         Args:
             new_subset_index: 0-based index of the subset to switch to
@@ -287,30 +302,32 @@ class Trainer:
         
         old_desc = f"subset {self.current_data_subset_index+1}/{self.num_data_subsets}" if hasattr(self, 'current_data_subset_index') else "unknown"
         new_desc = f"subset {new_subset_index+1}/{self.num_data_subsets}"
-        print(f"\nSwitching data: {old_desc} → {new_desc}")
+        print(f"\nSwitching training data: {old_desc} → {new_desc}")
         
-        # Destroy current dataloaders if they exist
+        # Destroy current training dataloader if it exists (keep eval loader)
         if self.train_loader is not None:
-            destroy_dataloaders(
-                self.train_loader, 
-                self.val_loader, 
-                self.dataloader_info,
-                verbose=True
-            )
+            print("Destroying old training dataloader...")
             
-            # Clear references
-            self.train_loader = None
-            self.val_loader = None
-            self.train_dataset = None
-            self.val_dataset = None
-            self.dataloader_info = None
+            # Delete training dataset and dataloader only
+            if hasattr(self.train_dataset, 'data'):
+                del self.train_dataset.data
+            del self.train_dataset
+            del self.train_loader
+            
+            # Note: We keep eval_loader and eval_dataset intact
+            
+            # Clear partial info (keeping eval-related info)
+            if self.dataloader_info is not None:
+                # Remove train-specific info but keep eval info
+                self.dataloader_info['train_dataset'] = None
+                self.dataloader_info['train_size'] = 0
             
             # Force garbage collection
             import gc
             gc.collect()
             torch.cuda.empty_cache()
         
-        # Create new dataloaders for the new subset
+        # Create new training dataloader for the new subset (eval stays the same)
         self._create_dataloaders(new_subset_index)
     
     def _setup_optimizer(self) -> torch.optim.Optimizer:
@@ -423,10 +440,10 @@ class Trainer:
     
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
-        """Run validation loop with optimized CPU→GPU transfers.
+        """Run validation loop using fixed evaluation dataset.
         
-        Data is transferred from CPU to GPU with non_blocking=True,
-        allowing overlap with computation.
+        Evaluation data is transferred from CPU to GPU on-demand,
+        then cleaned up after validation to save VRAM.
         
         Returns:
             Dictionary of validation metrics
@@ -437,25 +454,19 @@ class Trainer:
         total_tokens = 0
         num_batches = 0
         
-        # Use subset of validation data for speed
+        # Use subset of evaluation data for speed
         max_val_batches = 50 if not self.test_mode else 10
         
         # Flag to track if we've shown visualization
         visualization_shown = False
         
-        for i, batch in enumerate(self.val_loader):
+        for i, batch in enumerate(self.eval_loader):
             if i >= max_val_batches:
                 break
             
-            # Transfer batch from CPU to GPU with non-blocking transfer
-            # This allows the transfer to overlap with previous batch computation
-            batch = batch.to(self.device, non_blocking=True)
-            
-            # Ensure transfer is complete before computation
-            # This synchronization is necessary when using non_blocking transfers
-            if i == 0:
-                # Only sync on first batch to establish the pattern
-                torch.cuda.synchronize()
+            # Transfer batch from CPU to GPU (eval data is on CPU)
+            # No non_blocking since we need immediate computation
+            batch = batch.to(self.device)
             
             # Forward pass with bfloat16 autocast (same as training)
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
@@ -533,9 +544,13 @@ class Trainer:
             num_batches += 1
             
             # Explicitly delete GPU tensors to free memory immediately
+            # This is especially important since eval batches are transferred from CPU
             del outputs  # Delete the entire outputs dictionary
             del loss     # Delete the loss tensor
             del batch    # Delete the GPU batch tensor
+            
+            # Clear GPU cache after each batch to ensure memory is freed
+            torch.cuda.empty_cache()
         
         # Calculate average metrics
         batch_size = self.config['training']['batch_size']
@@ -699,16 +714,15 @@ class Trainer:
                 saved_subset_idx = self.num_data_subsets - 1  # Stay on last subset
         
         # Recalculate steps dynamically based on train_quarter flag and remaining data
-        from dataloader import calculate_dataloader_stats
+        from dataloader import calculate_fixed_eval_dataloader_stats
         
         # Get num_epochs from config
         num_epochs = self.config['training'].get('num_epochs', 1)
         
-        if self.train_single_subset:
-            # Train on single subset only
-            current_subset_stats = calculate_dataloader_stats(
+        if self.test_mode:
+            # Test mode - train on single subset only
+            current_subset_stats = calculate_fixed_eval_dataloader_stats(
                 batch_size=self.config['training']['batch_size'],
-                val_split=0.1,
                 test_mode=self.test_mode,
                 subset_index=saved_subset_idx,
                 num_subsets=self.num_data_subsets
@@ -718,7 +732,7 @@ class Trainer:
             if current_subset_stats['train_batches'] % self.gradient_accumulation_steps != 0:
                 steps_in_current_subset += 1
             
-            # For single subset mode, complete the remaining steps of the current subset
+            # For test mode, complete the remaining steps of the current subset
             # accounting for the epochs
             self.max_steps = steps_in_current_subset * num_epochs
             self.total_training_steps = self.max_steps
@@ -728,9 +742,8 @@ class Trainer:
             total_steps = 0
             
             for subset_idx in range(self.num_data_subsets):
-                subset_stats = calculate_dataloader_stats(
+                subset_stats = calculate_fixed_eval_dataloader_stats(
                     batch_size=self.config['training']['batch_size'],
-                    val_split=0.1,
                     test_mode=self.test_mode,
                     subset_index=subset_idx,
                     num_subsets=self.num_data_subsets
@@ -753,8 +766,8 @@ class Trainer:
         remaining_steps = self.max_steps - self.global_step
         progress_percent = (self.global_step / self.max_steps * 100) if self.max_steps > 0 else 0
         
-        if self.train_single_subset:
-            print(f"  Mode: Single subset training")
+        if self.test_mode:
+            print(f"  Mode: Test mode (single subset training)")
             print(f"  Progress: {self.global_step}/{self.max_steps} steps ({progress_percent:.1f}%)")
             print(f"  Remaining: {remaining_steps} steps")
         else:
@@ -924,6 +937,9 @@ class Trainer:
                                 # Get smoothed metrics
                                 smoothed = self.metrics.get_smoothed_metrics()
                                 
+                                # Override learning_rate with actual value (not smoothed)
+                                smoothed['learning_rate'] = current_lr
+                                
                                 # Log to dual logger
                                 self.logger.log_scalars(smoothed, self.global_step, prefix="train")
                             
@@ -977,18 +993,18 @@ class Trainer:
                             print(f"\n🎉 All {self.num_data_subsets} subsets completed! Training finished.")
                             break
                 
-                # Check if we should continue or stop based on train_single_subset flag
+                # Check if we should continue or stop based on test mode
                 if self.global_step >= self.max_steps:
-                    if self.train_single_subset:
-                        print(f"\nCompleted current subset. Stopping training (single subset mode).")
+                    if self.test_mode:
+                        print(f"\nCompleted current subset. Stopping training (test mode).")
                         break
                     else:
                         # In full training mode, we've completed all subsets
                         print(f"\nCompleted all training steps across all subsets.")
                         break
                 
-                # Reset to first subset for next epoch if not in single subset mode
-                if not self.train_single_subset and subset_idx == self.num_data_subsets - 1:
+                # Reset to first subset for next epoch if not in test mode
+                if not self.test_mode and subset_idx == self.num_data_subsets - 1:
                     # Completed all subsets but haven't reached max_steps
                     # Reset for another pass through the data
                     current_subset_idx = 0
@@ -1034,13 +1050,11 @@ def main():
     parser.add_argument('--model-size', type=str, choices=['small', 'medium', 'large'], default=None,
                        help='Model size to use (small, medium, or large). Defaults to config setting.')
     parser.add_argument('--test', action='store_true',
-                       help='Run in test mode with smaller dataset')
+                       help='Run in test mode - train on 1 chunk (1/64 of data)')
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint to resume from')
     parser.add_argument('--name', type=str, default=None,
                        help='Experiment name for logging')
-    parser.add_argument('--train-single', action='store_true',
-                       help='Train on first subset only (default: train on all subsets sequentially)')
     
     args = parser.parse_args()
     
@@ -1050,8 +1064,7 @@ def main():
         model_size=args.model_size,
         test_mode=args.test,
         resume_from=args.resume,
-        experiment_name=args.name,
-        train_single_subset=args.train_single
+        experiment_name=args.name
     )
     
     trainer.train()

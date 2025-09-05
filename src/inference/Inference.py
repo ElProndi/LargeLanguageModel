@@ -9,12 +9,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+# Add parent directory to path to allow imports when running directly
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
 import torch
 
 # Import project modules
-from src.utils.model import TransformerLM
-from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
-from src.inference.benchmark import ModelBenchmark, format_benchmark_results, save_benchmark_results
+try:
+    # Try relative imports (when imported as a module)
+    from ..utils.model import TransformerLM
+    from ..dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from .benchmark import ModelBenchmark, format_benchmark_results, save_benchmark_results
+except ImportError:
+    # Fall back to absolute imports (when run directly)
+    from src.utils.model import TransformerLM
+    from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from src.inference.benchmark import ModelBenchmark, format_benchmark_results, save_benchmark_results
 
 
 # ANSI color codes for terminal output

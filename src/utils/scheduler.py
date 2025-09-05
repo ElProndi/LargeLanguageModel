@@ -58,8 +58,8 @@ def get_cosine_schedule_with_warmup(
         # Cosine annealing phase (adjusted to reach minimum at cosine_end_step)
         progress = float(current_step - num_warmup_steps) / float(max(1, cosine_end_step - num_warmup_steps))
         
-        # Calculate cosine multiplier
-        cosine_mult = 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress))
+        # Calculate cosine multiplier (standard half-cosine for num_cycles=0.5)
+        cosine_mult = 0.5 * (1.0 + math.cos(math.pi * 2.0 * num_cycles * progress))
         
         # Apply minimum learning rate
         return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_mult

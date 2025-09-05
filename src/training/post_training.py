@@ -10,6 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+# Add parent directory to path to allow imports when running directly
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,11 +21,20 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, TensorDataset
 
 # Import project modules
-from src.utils.model import create_model, TransformerLM
-from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
-from src.utils.logging_utils import DualLogger
-from src.utils.scheduler import get_cosine_schedule_with_warmup
-from src.utils.metrics import MetricsTracker
+try:
+    # Try relative imports (when imported as a module)
+    from ..utils.model import create_model, TransformerLM
+    from ..dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from ..utils.logging_utils import DualLogger
+    from ..utils.scheduler import get_cosine_schedule_with_warmup
+    from ..utils.metrics import MetricsTracker
+except ImportError:
+    # Fall back to absolute imports (when run directly)
+    from src.utils.model import create_model, TransformerLM
+    from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from src.utils.logging_utils import DualLogger
+    from src.utils.scheduler import get_cosine_schedule_with_warmup
+    from src.utils.metrics import MetricsTracker
 
 # Enable CUDA optimizations
 torch.backends.cuda.matmul.allow_tf32 = True
