@@ -1,481 +1,327 @@
 #!/usr/bin/env python3
-"""FineWeb dataset optimized downloader with efficient sharding.
+"""FineWeb dataset downloader using HuggingFace's native capabilities.
 
-This module downloads the FineWeb-100BT dataset using multiple worker processes
-with dataset sharding for truly parallel downloading - each worker downloads only
-its portion of data, eliminating redundant downloads.
-
-Architecture:
-- Main process: Coordination and progress tracking
-- N worker processes: Parallel downloading via dataset sharding
-- 1 writer process: Sequential disk writes (not a bottleneck)
+This module downloads the FineWeb dataset from HuggingFace using the built-in
+load_dataset function with optimized parameters for full dataset downloading.
 
 Features:
-- Efficient sharding: Each worker downloads ONLY its data (no redundancy)
-- 4-8x bandwidth savings compared to skip/take approach
-- Zero inter-worker communication needed
-- Minimal IPC overhead (only data to writer)
-- Memory-efficient queue with backpressure
+- Native HuggingFace parallel downloading with num_proc
+- Automatic caching and resume capabilities
+- Efficient JSONL export with chunking
+- Support for different dataset configurations (sample-10BT, sample-100BT, full)
+- Simple and maintainable codebase
 """
 
 import sys
 import json
 import time
-import signal
 import argparse
-import random
-import multiprocessing as mp
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, List
-from dataclasses import dataclass
-from queue import Empty
+from typing import Optional, Dict, Any
 from tqdm import tqdm
 
 # Try to import datasets library
 try:
-    from datasets import load_dataset
+    from datasets import load_dataset, Dataset
 except ImportError:
     print("Error: datasets library not found. Please install it with:")
     print("  pip install datasets")
     sys.exit(1)
 
 
-@dataclass
-class WorkerConfig:
-    """Configuration for a download worker."""
-    worker_id: int
-    total_workers: int
-    chunk_size: int
-    max_documents: Optional[int]  # Total documents to process (optional limit)
-
-
-class DownloadWorker:
-    """Worker process that downloads its shard of the dataset efficiently."""
+class FineWebDownloader:
+    """Simplified FineWeb dataset downloader using HuggingFace native capabilities."""
     
-    def __init__(self, config: WorkerConfig, output_queue: mp.Queue, progress_queue: mp.Queue):
-        """Initialize download worker.
-        
-        Args:
-            config: Worker configuration with sharding info
-            output_queue: Queue for sending chunks to writer
-            progress_queue: Queue for progress updates to main
-        """
-        self.config = config
-        self.output_queue = output_queue
-        self.progress_queue = progress_queue
-        
-        # Worker-local statistics
-        self.documents_processed = 0
-        self.bytes_downloaded = 0
-        
-    def run(self):
-        """Main worker loop - downloads only this worker's shard of data."""
-        try:
-            # Load dataset in streaming mode
-            dataset = load_dataset(
-                "HuggingFaceFW/fineweb",
-                name="sample-100BT",
-                split="train",
-                streaming=True
-            )
-            
-            # Use efficient sharding - each worker only downloads its portion!
-            # This avoids the massive redundancy of skip/take approach
-            worker_dataset = dataset.shard(
-                num_shards=self.config.total_workers,
-                index=self.config.worker_id
-            )
-            
-            # Apply document limit if specified (for test mode)
-            if self.config.max_documents:
-                docs_per_worker = self.config.max_documents // self.config.total_workers
-                # Give extra docs to first workers if not evenly divisible
-                if self.config.worker_id < (self.config.max_documents % self.config.total_workers):
-                    docs_per_worker += 1
-                worker_dataset = worker_dataset.take(docs_per_worker)
-            
-            # Process documents in chunks
-            chunk_docs = []
-            docs_in_chunk = 0
-            chunk_id = self.config.worker_id * 1000  # Unique chunk IDs per worker
-            
-            # Process documents
-            for doc_idx, example in enumerate(worker_dataset):
-                try:
-                    # Extract text
-                    text = example.get('text', '')
-                    if not text:
-                        continue  # Skip empty docs
-                    
-                    # Add to current chunk
-                    # Use worker_id and doc_idx to create unique document IDs
-                    chunk_docs.append({
-                        'id': f"w{self.config.worker_id}_d{doc_idx}",
-                        'text': text,
-                        'length': len(text)
-                    })
-                    docs_in_chunk += 1
-                    self.documents_processed += 1
-                    self.bytes_downloaded += len(text)
-                    
-                    # Send chunk when full
-                    if docs_in_chunk >= self.config.chunk_size:
-                        self.send_chunk(chunk_id, chunk_docs)
-                        
-                        # Reset for next chunk
-                        chunk_docs = []
-                        docs_in_chunk = 0
-                        chunk_id += 1
-                        
-                    # Send progress update every 1000 docs
-                    if self.documents_processed % 1000 == 0:
-                        self.send_progress()
-                    
-                except Exception as e:
-                    # Log error and skip the document
-                    self.progress_queue.put({
-                        'worker_id': self.config.worker_id,
-                        'status': f'Skipping doc {doc_idx} due to error: {e}',
-                        'documents': self.documents_processed,
-                        'bytes': self.bytes_downloaded
-                    })
-                    continue
-            
-            # Send remaining documents
-            if chunk_docs:
-                self.send_chunk(chunk_id, chunk_docs)
-            
-            # Send final progress
-            self.send_progress()
-            
-            # Signal worker completion
-            self.output_queue.put(('WORKER_DONE', self.config.worker_id, None))
-            
-        except Exception as e:
-            # Send error signal
-            self.output_queue.put(('ERROR', self.config.worker_id, str(e)))
-        
-    def send_chunk(self, chunk_id: int, documents: List[Dict]):
-        """Send a chunk of documents to the writer.
-        
-        Args:
-            chunk_id: Unique identifier for this chunk
-            documents: List of document dictionaries
-        """
-        self.output_queue.put(('CHUNK', chunk_id, documents))
-        
-    def send_progress(self):
-        """Send progress update to main process."""
-        self.progress_queue.put({
-            'worker_id': self.config.worker_id,
-            'documents': self.documents_processed,
-            'bytes': self.bytes_downloaded
-        })
-
-
-class WriterProcess:
-    """Single writer process that handles all disk I/O."""
+    # Dataset configurations with their sizes
+    DATASET_CONFIGS = {
+        "sample-10BT": {
+            "name": "sample-10BT",
+            "size_gb": 27.6,
+            "tokens": "10 billion",
+            "description": "10B token sample"
+        },
+        "sample-100BT": {
+            "name": "sample-100BT",
+            "size_gb": 277.4,
+            "tokens": "100 billion",
+            "description": "100B token sample"
+        },
+        "sample-350BT": {
+            "name": "sample-350BT", 
+            "size_gb": 968.9,
+            "tokens": "350 billion",
+            "description": "350B token sample"
+        },
+        "default": {
+            "name": "default",
+            "size_gb": 45000,  # ~45TB
+            "tokens": "15 trillion",
+            "description": "Full FineWeb dataset (15T tokens)"
+        }
+    }
     
-    def __init__(self, input_queue: mp.Queue, output_dir: Path, chunk_size: int):
-        """Initialize writer process.
+    def __init__(self, 
+                 output_dir: Path,
+                 config_name: str = "sample-100BT",
+                 cache_dir: Optional[Path] = None,
+                 num_proc: int = 4):
+        """Initialize the FineWeb downloader.
         
         Args:
-            input_queue: Queue to receive chunks from workers
             output_dir: Directory to save JSONL files
-            chunk_size: Documents per file (for naming)
+            config_name: Dataset configuration to download
+            cache_dir: Cache directory for HuggingFace datasets
+            num_proc: Number of processes for parallel downloading
         """
-        self.input_queue = input_queue
         self.output_dir = output_dir
-        self.chunk_size = chunk_size
+        self.config_name = config_name
+        self.cache_dir = cache_dir or Path.home() / ".cache" / "huggingface" / "datasets"
+        self.num_proc = num_proc
         
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Writing state
-        self.chunk_counter = 0
-        self.workers_completed = 0
-        self.total_documents = 0
-        self.total_bytes = 0
+        # Validate configuration
+        if config_name not in self.DATASET_CONFIGS:
+            raise ValueError(f"Invalid config: {config_name}. Choose from: {list(self.DATASET_CONFIGS.keys())}")
         
-    def run(self, total_workers: int):
-        """Main writer loop - writes chunks to disk.
-        
-        Args:
-            total_workers: Number of workers to wait for
-        """
-        while self.workers_completed < total_workers:
-            try:
-                # Get next item from queue (timeout prevents hanging)
-                msg_type, chunk_id, data = self.input_queue.get(timeout=1.0)
-                
-                if msg_type == 'CHUNK':
-                    # Write chunk to disk
-                    self.write_chunk(chunk_id, data)
-                    
-                elif msg_type == 'WORKER_DONE':
-                    self.workers_completed += 1
-                    
-                elif msg_type == 'ERROR':
-                    print(f"\nWorker {chunk_id} error: {data}")
-                    self.workers_completed += 1
-                    
-            except Empty:
-                # Queue is empty, continue waiting
-                continue
-            except Exception as e:
-                print(f"\nWriter error: {e}")
-                break
-        
-        # Save final metadata
-        self.save_metadata()
-        
-    def write_chunk(self, chunk_id: int, documents: List[Dict]):
-        """Write a chunk of documents to disk.
+        self.config = self.DATASET_CONFIGS[config_name]
+    
+    def download_dataset(self, max_samples: Optional[int] = None) -> Dataset:
+        """Download the FineWeb dataset using HuggingFace's load_dataset.
         
         Args:
-            chunk_id: Chunk identifier
-            documents: List of document dictionaries
+            max_samples: Maximum number of samples to download (for testing)
+            
+        Returns:
+            Downloaded dataset
         """
-        # Generate filename
-        chunk_filename = f"fineweb_chunk_{self.chunk_counter:05d}.jsonl"
-        chunk_path = self.output_dir / chunk_filename
+        print(f"\nDownloading FineWeb dataset")
+        print("=" * 60)
+        print(f"Configuration: {self.config_name}")
+        print(f"Description: {self.config['description']}")
+        print(f"Size: ~{self.config['size_gb']:.1f} GB")
+        print(f"Tokens: {self.config['tokens']}")
+        print(f"Cache directory: {self.cache_dir}")
+        print(f"Output directory: {self.output_dir}")
+        print(f"Parallel processes: {self.num_proc}")
+        print("=" * 60)
         
-        # Write documents
-        with open(chunk_path, 'w', encoding='utf-8') as f:
-            for doc in documents:
-                json.dump(doc, f, ensure_ascii=False)
-                f.write('\n')
-                self.total_documents += 1
-                self.total_bytes += doc['length']
+        if self.config['size_gb'] > 1000:
+            print("\n⚠️  WARNING: This is a very large dataset!")
+            print(f"   Estimated download size: {self.config['size_gb']:.1f} GB")
+            print("   Ensure you have sufficient disk space before proceeding.")
+            response = input("\nContinue with download? (y/n): ")
+            if response.lower() != 'y':
+                print("Download cancelled.")
+                sys.exit(0)
         
-        self.chunk_counter += 1
+        print("\nDownloading dataset from HuggingFace...")
+        print("(This will cache the dataset for future use)")
         
-    def save_metadata(self):
-        """Save metadata about the download."""
+        try:
+            # Download the dataset with native HuggingFace capabilities
+            dataset = load_dataset(
+                "HuggingFaceFW/fineweb",
+                name=self.config['name'],
+                split="train",
+                cache_dir=str(self.cache_dir),
+                num_proc=self.num_proc if self.num_proc > 1 else None,
+                trust_remote_code=True
+            )
+            
+            # Apply sample limit if specified
+            if max_samples:
+                print(f"\nLimiting to {max_samples:,} samples for testing...")
+                dataset = dataset.select(range(min(max_samples, len(dataset))))
+            
+            print(f"\n✓ Dataset downloaded successfully!")
+            print(f"  Total samples: {len(dataset):,}")
+            
+            return dataset
+            
+        except Exception as e:
+            print(f"\n❌ Error downloading dataset: {e}")
+            sys.exit(1)
+    
+    def save_to_jsonl(self, 
+                      dataset: Dataset, 
+                      chunk_size: int = 100000,
+                      single_file: bool = False) -> Dict[str, Any]:
+        """Save the dataset to JSONL format.
+        
+        Args:
+            dataset: HuggingFace dataset to save
+            chunk_size: Number of documents per JSONL file
+            single_file: If True, save as a single JSONL file
+            
+        Returns:
+            Dictionary with save statistics
+        """
+        print(f"\nSaving dataset to JSONL format...")
+        print(f"Chunk size: {chunk_size:,} documents per file")
+        
+        start_time = time.time()
+        total_bytes = 0
+        file_count = 0
+        
+        if single_file:
+            # Save as single file
+            output_path = self.output_dir / "fineweb_complete.jsonl"
+            print(f"Saving to: {output_path}")
+            
+            dataset.to_json(
+                str(output_path),
+                batch_size=chunk_size,
+                num_proc=self.num_proc if self.num_proc > 1 else None
+            )
+            file_count = 1
+            total_bytes = output_path.stat().st_size
+            
+        else:
+            # Save in chunks
+            total_samples = len(dataset)
+            num_chunks = (total_samples + chunk_size - 1) // chunk_size
+            
+            print(f"Creating {num_chunks} chunk files...")
+            
+            with tqdm(total=num_chunks, desc="Saving chunks") as pbar:
+                for i in range(0, total_samples, chunk_size):
+                    chunk_end = min(i + chunk_size, total_samples)
+                    chunk_data = dataset.select(range(i, chunk_end))
+                    
+                    # Save chunk
+                    chunk_filename = f"fineweb_chunk_{file_count:05d}.jsonl"
+                    chunk_path = self.output_dir / chunk_filename
+                    
+                    chunk_data.to_json(
+                        str(chunk_path),
+                        num_proc=self.num_proc if self.num_proc > 1 else None
+                    )
+                    
+                    total_bytes += chunk_path.stat().st_size
+                    file_count += 1
+                    pbar.update(1)
+        
+        # Save metadata
         metadata = {
-            'total_documents': self.total_documents,
-            'total_bytes': self.total_bytes,
-            'chunk_files': self.chunk_counter,
-            'complete': self.workers_completed > 0
+            'dataset_config': self.config_name,
+            'total_samples': len(dataset),
+            'total_bytes': total_bytes,
+            'chunk_size': chunk_size,
+            'num_files': file_count,
+            'single_file': single_file,
+            'save_time_seconds': time.time() - start_time
         }
         
         metadata_path = self.output_dir / 'metadata.json'
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
+        
+        print(f"\n✓ Dataset saved successfully!")
+        print(f"  Files created: {file_count}")
+        print(f"  Total size: {total_bytes / 1e9:.2f} GB")
+        print(f"  Time taken: {metadata['save_time_seconds'] / 60:.1f} minutes")
+        
+        return metadata
 
 
-class FineWebFastDownloader:
-    """Multiprocessing coordinator for fast FineWeb downloads."""
-    
-    def __init__(self,
-                 output_dir: Path,
-                 num_workers: int = 8,
-                 chunk_size: int = 100000,
-                 queue_size: int = 100):
-        """Initialize the fast downloader.
-        
-        Args:
-            output_dir: Directory to save JSONL files
-            num_workers: Number of parallel download workers
-            chunk_size: Documents per chunk file
-            queue_size: Maximum chunks in queue
-        """
-        self.output_dir = output_dir
-        self.num_workers = num_workers
-        self.chunk_size = chunk_size
-        self.queue_size = queue_size
-        
-        # Create output directory
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-    
-    def download(self, max_documents: Optional[int] = None, test_mode: bool = False):
-        """Download FineWeb dataset using multiple workers.
-        
-        Args:
-            max_documents: Maximum documents to download (None for all)
-            test_mode: If True, download only a small sample
-        """
-        start_time = time.time()
-        
-        # Determine total documents
-        if test_mode:
-            total_documents = self.chunk_size * 2  # Two chunks for testing
-        elif max_documents:
-            total_documents = max_documents
-        else:
-            # FineWeb-100BT contains ~148 million documents (100 billion tokens)
-            total_documents = 148_000_000
-            print(f"Downloading complete FineWeb-100BT dataset (~148M documents, 100B tokens, ~277GB)")
-        
-        print(f"\nFast Multiprocessing Downloader (Optimized with Sharding)")
-        print(f"=" * 60)
-        print(f"Workers: {self.num_workers}")
-        print(f"Documents to download: {total_documents:,}")
-        print(f"Documents per worker: ~{total_documents//self.num_workers:,}")
-        print(f"Chunk size: {self.chunk_size:,} docs/file")
-        print(f"Output directory: {self.output_dir}")
-        print(f"Using efficient sharding - each worker downloads only its portion!")
-        print("=" * 60)
-        
-        # Create queues
-        output_queue = mp.Queue(maxsize=self.queue_size)
-        progress_queue = mp.Queue()
-        
-        # Start writer process
-        writer = WriterProcess(output_queue, self.output_dir, self.chunk_size)
-        writer_process = mp.Process(target=writer.run, args=(self.num_workers,))
-        writer_process.start()
-        
-        # Start worker processes with staggered startup to avoid rate limiting
-        workers = []
-        startup_delay = 3.0  # Delay between worker startups (seconds)
-        
-        print(f"\nStarting {self.num_workers} workers with {startup_delay}s staggered startup...")
-        
-        for i in range(self.num_workers):
-            config = WorkerConfig(
-                worker_id=i,
-                total_workers=self.num_workers,
-                chunk_size=self.chunk_size,
-                max_documents=total_documents if (test_mode or max_documents) else None
-            )
-            
-            worker = DownloadWorker(config, output_queue, progress_queue)
-            process = mp.Process(target=worker.run)
-            process.start()
-            workers.append(process)
-            
-            docs_estimate = total_documents // self.num_workers
-            print(f"Started worker {i}: processing ~{docs_estimate:,} documents (shard {i}/{self.num_workers})")
-            
-            # Stagger worker startup to prevent simultaneous API hits
-            if i < self.num_workers - 1:  # Don't delay after the last worker
-                print(f"  Waiting {startup_delay}s before starting next worker...")
-                time.sleep(startup_delay)
-        
-        # Monitor progress
-        print("\nDownloading...")
-        pbar = tqdm(total=total_documents, unit='docs', smoothing=0.1)
-        
-        total_docs_downloaded = 0
-        total_bytes_downloaded = 0
-        worker_status = {}
-        
-        # Monitor until all workers complete
-        workers_alive = len(workers)
-        while workers_alive > 0:
-            # Check progress updates
-            while not progress_queue.empty():
-                try:
-                    update = progress_queue.get_nowait()
-                    worker_id = update['worker_id']
-                    
-                    # Check if this is a status message (rate limiting, etc.)
-                    if 'status' in update:
-                        # Show status message in progress bar description
-                        pbar.set_description(f"Worker {worker_id}: {update['status']}")
-                    
-                    # Update total counts
-                    if worker_id in worker_status:
-                        old_docs = worker_status[worker_id].get('documents', 0)
-                        new_docs = update.get('documents', 0)
-                        if new_docs > old_docs:
-                            pbar.update(new_docs - old_docs)
-                            total_docs_downloaded += new_docs - old_docs
-                        
-                        # Recalculate total bytes
-                        worker_status[worker_id] = update
-                        total_bytes_downloaded = sum(
-                            w.get('bytes', 0) for w in worker_status.values()
-                        )
-                    else:
-                        docs = update.get('documents', 0)
-                        if docs > 0:
-                            pbar.update(docs)
-                            total_docs_downloaded += docs
-                            total_bytes_downloaded += update.get('bytes', 0)
-                        worker_status[worker_id] = update
-                    
-                    # Update progress bar
-                    pbar.set_postfix({
-                        'workers': workers_alive,
-                        'GB': f"{total_bytes_downloaded/1e9:.2f}"
-                    })
-                    
-                except Empty:
-                    break
-            
-            # Check if workers are still alive
-            workers_alive = sum(1 for w in workers if w.is_alive())
-            time.sleep(0.1)
-        
-        pbar.close()
-        
-        # Wait for all processes to complete
-        for worker in workers:
-            worker.join()
-        
-        writer_process.join()
-        
-        # Print summary
-        download_time = time.time() - start_time
-        print("\n" + "=" * 60)
-        print("Download Complete!")
-        print("=" * 60)
-        print(f"Total documents: {total_docs_downloaded:,}")
-        print(f"Total size: {total_bytes_downloaded / 1e9:.2f} GB")
-        print(f"Download time: {download_time/60:.1f} minutes")
-        print(f"Average speed: {total_docs_downloaded/download_time:.1f} docs/sec")
-        print(f"Throughput: {total_bytes_downloaded/download_time/1e6:.1f} MB/s")
-        print(f"Output saved to: {self.output_dir}")
-        print(f"\nEfficiency: Using sharding saved ~{(self.num_workers-1)/self.num_workers*100:.0f}% bandwidth!")
 
 
 def main():
-    """Main entry point for the fast FineWeb downloader."""
-    parser = argparse.ArgumentParser(description="Fast parallel FineWeb downloader")
+    """Main entry point for FineWeb dataset downloader."""
+    parser = argparse.ArgumentParser(
+        description="Download FineWeb dataset from HuggingFace",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Available configurations:
+  sample-10BT   : 10B tokens, ~27.6 GB
+  sample-100BT  : 100B tokens, ~277.4 GB (default)
+  sample-350BT  : 350B tokens, ~968.9 GB
+  default       : Full dataset, 15T tokens, ~45 TB
+
+Examples:
+  # Test mode - download 1000 samples
+  python -m src.dataset_preparation.fineweb_download --test
+  
+  # Download sample-10BT dataset
+  python -m src.dataset_preparation.fineweb_download --config sample-10BT
+  
+  # Download with 8 parallel processes
+  python -m src.dataset_preparation.fineweb_download --num-proc 8
+  
+  # Custom output directory
+  python -m src.dataset_preparation.fineweb_download --output /path/to/output
+"""
+    )
+    
     parser.add_argument("--test", action="store_true",
-                       help="Test mode: download only two chunks")
-    parser.add_argument("--workers", type=int, default=2,
-                       help="Number of download workers (default: 2)")
+                       help="Test mode: download only 1000 samples")
+    parser.add_argument("--config", type=str, default="sample-100BT",
+                       choices=list(FineWebDownloader.DATASET_CONFIGS.keys()),
+                       help="Dataset configuration to download (default: sample-100BT)")
+    parser.add_argument("--num-proc", type=int, default=4,
+                       help="Number of parallel processes (default: 4)")
     parser.add_argument("--chunk-size", type=int, default=100000,
                        help="Documents per chunk file (default: 100000)")
-    parser.add_argument("--max-docs", type=int, default=None,
-                       help="Maximum documents to download (default: all)")
-    parser.add_argument("--queue-size", type=int, default=100,
-                       help="Maximum chunks in queue (default: 100)")
+    parser.add_argument("--max-samples", type=int, default=None,
+                       help="Maximum samples to download (default: all)")
+    parser.add_argument("--single-file", action="store_true",
+                       help="Save as single JSONL file instead of chunks")
     parser.add_argument("--output", type=str, default=None,
                        help="Output directory (default: data/raw/fineweb)")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                       help="HuggingFace cache directory (default: ~/.cache/huggingface)")
     
     args = parser.parse_args()
     
     # Set output directory
-    if args.output:
-        output_dir = Path(args.output)
-    else:
-        output_dir = Path("data/raw/fineweb")
+    output_dir = Path(args.output) if args.output else Path("data/raw/fineweb")
+    
+    # Set cache directory
+    cache_dir = Path(args.cache_dir) if args.cache_dir else None
+    
+    # Handle test mode
+    max_samples = args.max_samples
+    if args.test:
+        max_samples = 1000
+        print("Running in test mode: limiting to 1000 samples")
     
     # Create downloader
-    downloader = FineWebFastDownloader(
+    downloader = FineWebDownloader(
         output_dir=output_dir,
-        num_workers=args.workers,
-        chunk_size=args.chunk_size,
-        queue_size=args.queue_size
+        config_name=args.config,
+        cache_dir=cache_dir,
+        num_proc=args.num_proc
     )
     
-    # Handle Ctrl+C gracefully
-    def signal_handler(sig, frame):
-        print("\n\nShutting down workers...")
+    try:
+        # Download dataset
+        dataset = downloader.download_dataset(max_samples=max_samples)
+        
+        # Save to JSONL
+        metadata = downloader.save_to_jsonl(
+            dataset,
+            chunk_size=args.chunk_size,
+            single_file=args.single_file
+        )
+        
+        print("\n" + "=" * 60)
+        print("✓ Download and save complete!")
+        print("=" * 60)
+        print(f"Configuration: {args.config}")
+        print(f"Total samples: {metadata['total_samples']:,}")
+        print(f"Total size: {metadata['total_bytes'] / 1e9:.2f} GB")
+        print(f"Files created: {metadata['num_files']}")
+        print(f"Output directory: {output_dir}")
+        print(f"Metadata saved to: {output_dir / 'metadata.json'}")
+        
+    except KeyboardInterrupt:
+        print("\n\nDownload interrupted by user.")
         sys.exit(130)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    # Start download
-    downloader.download(
-        max_documents=args.max_docs,
-        test_mode=args.test
-    )
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

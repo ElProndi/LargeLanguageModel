@@ -42,7 +42,8 @@
       "Bash(git --no-pager diff Inference.py)",
       "WebFetch(domain:marketplace.visualstudio.com)",
       "Bash(code:*)",
-      "Bash(jq:*)"
+      "Bash(jq:*)",
+      "Read(//lambda/nfs/Base-test/**)"
     ],
     "additionalDirectories": [
       "/home/andrea/Desktop/data/raw/enwiki_namespace_0"

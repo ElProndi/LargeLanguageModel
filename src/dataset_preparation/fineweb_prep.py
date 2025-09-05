@@ -568,7 +568,7 @@ def main():
                        help="Output directory for tokenized files (default: auto-generated based on mode)")
     parser.add_argument("--window", type=int, default=2048,
                        help="Context window size in tokens (default: 2048)")
-    parser.add_argument("--batch-size", type=int, default=700000,
+    parser.add_argument("--batch-size", type=int, default=200000,
                        help="Number of documents per output file (default: 700000, exactly 7 chunks)")
     
     args = parser.parse_args()
