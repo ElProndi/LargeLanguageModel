@@ -1,0 +1,52 @@
+{
+  "env": {
+    "MAX_THINKING_TOKENS": "31999"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(gh repo list:*)",
+      "Bash(gh repo edit:*)",
+      "Bash(gh repo view:*)",
+      "Bash(gh repo clone:*)",
+      "Bash(git clone:*)",
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git pull:*)",
+      "Bash(git branch:*)",
+      "Bash(mkdir:*)",
+      "Bash(ls:*)",
+      "Bash(cmake:*)",
+      "Bash(python:*)",
+      "Bash(pip3 install:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(cp:*)",
+      "Bash(claude mcp:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(pypy3:*)",
+      "Read(//home/andrea/Desktop/**)",
+      "Bash(cat:*)",
+      "Read(//home/andrea/Desktop/data/raw/enwiki_namespace_0/**)",
+      "Bash(sed:*)",
+      "Bash(pip3 list:*)",
+      "WebFetch(domain:docs.pytorch.org)",
+      "WebFetch(domain:github.com)",
+      "Bash(git add:*)",
+      "Bash(git diff:*)",
+      "Bash(git --no-pager diff CLAUDE.md)",
+      "Bash(git --no-pager diff config.json)",
+      "Bash(git --no-pager diff model.py)",
+      "Bash(git --no-pager diff train.py)",
+      "Bash(git --no-pager diff Inference.py)",
+      "WebFetch(domain:marketplace.visualstudio.com)",
+      "Bash(code:*)",
+      "Bash(jq:*)"
+    ],
+    "additionalDirectories": [
+      "/home/andrea/Desktop/data/raw/enwiki_namespace_0"
+    ]
+  },
+  "outputStyle": "default"
+}

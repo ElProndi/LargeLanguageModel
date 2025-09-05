@@ -4,8 +4,6 @@ __pycache__/
 *$py.class
 
 # IDE and editor folders
-.claude/
-.vscode/
 
 # Model and training artifacts
 tokenizers/
