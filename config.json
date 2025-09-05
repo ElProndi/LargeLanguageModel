@@ -5,39 +5,33 @@
       "hidden_size": 256,
       "num_layers": 4,
       "num_heads": 4,
-      "num_kv_heads": 1,
-      "max_position_embeddings": 512,
+      "max_position_embeddings": 2048,
       "dropout": 0.1,
       "attention_dropout": 0.1,
       "layer_norm_eps": 1e-5,
-      "initializer_range": 0.02,
-      "use_cache": true
+      "initializer_range": 0.02
     },
     "medium": {
       "vocab_size": 32016,
       "hidden_size": 768,
       "num_layers": 13,
       "num_heads": 12,
-      "num_kv_heads": 3,
-      "max_position_embeddings": 512,
+      "max_position_embeddings": 2048,
       "dropout": 0.1,
       "attention_dropout": 0.1,
       "layer_norm_eps": 1e-5,
-      "initializer_range": 0.02,
-      "use_cache": true
+      "initializer_range": 0.02
     },
     "large": {
       "vocab_size": 32016,
       "hidden_size": 1536,
       "num_layers": 40,
       "num_heads": 24,
-      "num_kv_heads": 6,
-      "max_position_embeddings": 512,
+      "max_position_embeddings": 2048,
       "dropout": 0.1,
       "attention_dropout": 0.1,
       "layer_norm_eps": 1e-5,
-      "initializer_range": 0.02,
-      "use_cache": true
+      "initializer_range": 0.02
     }
   },
   
@@ -76,8 +70,7 @@
   
   "dataset": {
     "source": "fineweb",
-    "wikipedia_test_dir": "/home/andrea/Desktop/data/tokenized_datasets/codellama_test_dataset",
-    "wikipedia_full_dir": "/home/andrea/Desktop/data/tokenized_datasets/codellama_full_dataset",
+    "fineweb_raw_dir": "/home/andrea/Desktop/data/raw/fineweb",
     "fineweb_test_dir": "/home/andrea/Desktop/data/tokenized_datasets/fineweb_test_dataset",
     "fineweb_full_dir": "/home/andrea/Desktop/data/tokenized_datasets/fineweb_full_dataset"
   },
@@ -86,6 +79,7 @@
     "checkpoint_dir": "checkpoints",
     "log_dir": "logs",
     "tokenizer_dir": "tokenizers/codellama_tokenizer",
+    "raw_data_dir": "/home/andrea/Desktop/data/raw",
     "dataset_dir": "/home/andrea/Desktop/data/tokenized_datasets/fineweb_full_dataset"
   },
   
@@ -95,10 +89,6 @@
   },
   
   "architecture_features": {
-    "use_gqa": true,
-    "use_scaled_residuals": false,
-    "use_gradient_checkpointing": false,
-    "use_flash_attention": true,
     "tie_embeddings": true
   }
 }

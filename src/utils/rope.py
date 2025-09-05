@@ -74,11 +74,8 @@ def apply_rotary_pos_emb(
     Returns:
         Tuple of rotated (q, k) tensors with same shapes as input
     """
-    # q and k might have different num_heads (due to GQA)
-    # q shape: (batch, num_q_heads, seq_len, head_dim)
-    # k shape: (batch, num_kv_heads, seq_len, head_dim)
-    batch_size, num_q_heads, seq_len, head_dim = q.shape
-    _, num_kv_heads, _, _ = k.shape
+    # q and k have the same shape: (batch, num_heads, seq_len, head_dim)
+    batch_size, num_heads, seq_len, head_dim = q.shape
     
     # Get frequencies for the current sequence length
     if position_ids is not None:
@@ -99,8 +96,8 @@ def apply_rotary_pos_emb(
     
     # Reshape q and k to separate pairs
     # From (..., head_dim) to (..., head_dim//2, 2)
-    q_reshape = q.reshape(batch_size, num_q_heads, seq_len, head_dim // 2, 2)
-    k_reshape = k.reshape(batch_size, num_kv_heads, seq_len, head_dim // 2, 2)
+    q_reshape = q.reshape(batch_size, num_heads, seq_len, head_dim // 2, 2)
+    k_reshape = k.reshape(batch_size, num_heads, seq_len, head_dim // 2, 2)
     
     # Extract pairs
     q_r = q_reshape[..., 0]  # Real parts (even indices)
@@ -120,8 +117,8 @@ def apply_rotary_pos_emb(
     k_rot = torch.stack([k_rot_r, k_rot_i], dim=-1)
     
     # Flatten last two dimensions to get back original shape
-    q_rot = q_rot.reshape(batch_size, num_q_heads, seq_len, head_dim)
-    k_rot = k_rot.reshape(batch_size, num_kv_heads, seq_len, head_dim)
+    q_rot = q_rot.reshape(batch_size, num_heads, seq_len, head_dim)
+    k_rot = k_rot.reshape(batch_size, num_heads, seq_len, head_dim)
     
     return q_rot, k_rot
 

@@ -12,9 +12,9 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 
 # Import project modules
-from model import TransformerLM
-from tokenizer import WikipediaTokenizer
-from benchmark import ModelBenchmark, format_benchmark_results, save_benchmark_results
+from src.utils.model import TransformerLM
+from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+from src.inference.benchmark import ModelBenchmark, format_benchmark_results, save_benchmark_results
 
 
 # ANSI color codes for terminal output
@@ -448,14 +448,14 @@ def load_models_for_inference(base_checkpoint_dir: Path, device: torch.device, m
             return None
 
 
-def _load_tokenizer() -> WikipediaTokenizer:
+def _load_tokenizer() -> CodeLlamaTokenizer:
     """Load or download the CodeLlama tokenizer.
     
     Returns:
-        Loaded WikipediaTokenizer instance
+        Loaded CodeLlamaTokenizer instance
     """
     print_message("Loading tokenizer...", "info")
-    tokenizer = WikipediaTokenizer()
+    tokenizer = CodeLlamaTokenizer()
     tokenizer_path = Path("tokenizers/codellama_tokenizer")
     
     if tokenizer_path.exists():
@@ -474,7 +474,7 @@ def _load_tokenizer() -> WikipediaTokenizer:
     return tokenizer
 
 
-def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device, compile_model: bool = True) -> Tuple[TransformerLM, WikipediaTokenizer]:
+def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device, compile_model: bool = True) -> Tuple[TransformerLM, CodeLlamaTokenizer]:
     """Load model from checkpoint and tokenizer.
     
     Args:
@@ -513,7 +513,6 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device, compil
     # Extract actual intermediate_size from the checkpoint's state_dict
     state_dict = checkpoint['model_state_dict']
     intermediate_size = None
-    use_scaled_residuals = False
     
     # Check for FFN layer dimensions to determine actual intermediate_size
     for key in state_dict.keys():
@@ -526,24 +525,8 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device, compil
             intermediate_size = state_dict[key].shape[0]
             break
     
-    # Check for residual scaling in checkpoint
-    use_scaled_residuals = any('residual_scale' in key for key in state_dict.keys())
-    
-    # Read Flash Attention setting from checkpoint config (required)
-    if 'use_flash_attention' not in architecture_features:
-        raise ValueError(
-            f"Missing 'use_flash_attention' in checkpoint's architecture_features. "
-            f"Available features: {list(architecture_features.keys())}"
-        )
-    
-    use_flash_attention_inference = architecture_features['use_flash_attention']
-    
-    # Disable KV caching when Flash Attention is enabled (they're mutually exclusive)
-    use_kv_cache = not use_flash_attention_inference
-    
     # Log the settings being used
-    print(f"  Flash Attention: {'✓ Enabled' if use_flash_attention_inference else '✗ Disabled'}")
-    print(f"  KV Caching: {'✓ Enabled' if use_kv_cache else '✗ Disabled (Flash Attention active)'}")
+    print(f"  Flash Attention: ✓ Always Enabled")
     
     # Create model with all architecture parameters from config
     model = TransformerLM(
@@ -551,27 +534,19 @@ def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device, compil
         hidden_size=model_config['hidden_size'],
         num_layers=model_config['num_layers'],
         num_heads=model_config['num_heads'],
-        # CRITICAL: Pass num_kv_heads to match trained model architecture
-        num_kv_heads=model_config.get('num_kv_heads', model_config['num_heads']),
         # Pass detected or configured intermediate_size
         intermediate_size=intermediate_size,  # Use detected size from checkpoint
         max_position_embeddings=model_config['max_position_embeddings'],
         # RoPE configuration
         rope_theta=rope_config.get('theta', 10000.0),
         rope_scaling=rope_config.get('scaling_factor', 1.0),
-        # Use detected residual scaling setting
-        use_scaled_residuals=use_scaled_residuals,
         # Architecture features from config - CRITICAL for correct model reconstruction
-        use_gqa=architecture_features.get('use_gqa', True),
-        use_flash_attention=use_flash_attention_inference,  # Use inference-specific setting
         tie_embeddings=architecture_features.get('tie_embeddings', True),
-        use_gradient_checkpointing=architecture_features.get('use_gradient_checkpointing', False),
         # Disable dropout for inference
         dropout=0.0,
         attention_dropout=0.0,
         layer_norm_eps=model_config['layer_norm_eps'],
         initializer_range=model_config['initializer_range'],
-        use_cache=use_kv_cache,  # Disabled when Flash Attention is active
         pad_token_id=tokenizer_config.get('pad_token_id', 2)  # Same as EOS token (CodeLlama convention)
     )
     
@@ -618,7 +593,7 @@ def load_multiple_models(
     checkpoint_info: Union[List[Path], List[Tuple[Path, Path]]], 
     device: torch.device,
     compile_model: bool = True
-) -> Tuple[Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], Dict[str, Dict], float]:
+) -> Tuple[Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]], Dict[str, Dict], float]:
     """Load multiple models from checkpoints.
     
     Args:
@@ -690,7 +665,7 @@ def load_multiple_models(
 
 
 
-def encode_prompt(tokenizer: WikipediaTokenizer, prompt: str, device: torch.device) -> Tuple[torch.Tensor, List[int], Dict]:
+def encode_prompt(tokenizer: CodeLlamaTokenizer, prompt: str, device: torch.device) -> Tuple[torch.Tensor, List[int], Dict]:
     """Encode prompt text into tokens with proper handling.
     
     Args:
@@ -744,7 +719,7 @@ def calculate_generation_stats(generated_ids: List[int], input_ids: List[int], g
     }
 
 
-def stream_tokens(tokenizer: WikipediaTokenizer, token_generator) -> Tuple[str, Dict]:
+def stream_tokens(tokenizer: CodeLlamaTokenizer, token_generator) -> Tuple[str, Dict]:
     """Stream tokens to console as they're generated.
     
     Args:
@@ -812,7 +787,7 @@ def stream_tokens(tokenizer: WikipediaTokenizer, token_generator) -> Tuple[str, 
 
 
 def generate_text_unified(
-    models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]],
+    models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]],
     prompt: str,
     device: torch.device,
     stream: bool = True,
@@ -1333,7 +1308,7 @@ def get_generation_params_interactive(defaults: Optional[Dict[str, any]] = None,
 
 
 
-def run_generation_loop(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], 
+def run_generation_loop(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]], 
                        device: torch.device, 
                        metadata: Optional[Dict] = None):
     """Run text generation loop."""
@@ -1361,7 +1336,7 @@ def run_generation_loop(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTok
             continue
         
         # Get generation parameters
-        defaults = {'max_length': 512 if is_multi else 200, 'temperature': 1, 'top_k': 50, 'top_p': 0.95}
+        defaults = {'max_length': 2048 if is_multi else 200, 'temperature': 1, 'top_k': 50, 'top_p': 0.95}
         generation_params, use_streaming = get_generation_params_interactive(defaults)
         
         print(f"\n{Colors.BOLD}Generating...{Colors.ENDC}")
@@ -1388,7 +1363,7 @@ def run_generation_loop(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTok
             break
 
 
-def run_benchmark(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], device: torch.device):
+def run_benchmark(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]], device: torch.device):
     """Run benchmark evaluation."""
     print(f"\n{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.CYAN}Starting benchmark evaluation...{Colors.ENDC}")
@@ -1425,7 +1400,7 @@ def run_benchmark(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer
     print_message("\nBenchmark completed successfully!", "success")
 
 
-def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], 
+def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]], 
                               device: torch.device, 
                               metadata: Optional[Dict] = None):
     """Run general knowledge evaluation."""
@@ -1667,7 +1642,7 @@ def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, Wikip
     print_message("\nGeneral knowledge evaluation completed!", "success")
 
 
-def run_chat_mode(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer]], 
+def run_chat_mode(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]], 
                   device: torch.device, 
                   metadata: Optional[Dict] = None):
     """Run interactive chat mode with conversation history.
@@ -1698,7 +1673,7 @@ def run_chat_mode(models_dict: Dict[str, Tuple[TransformerLM, WikipediaTokenizer
     
     # Get generation parameters once for the session
     print(f"\n{Colors.BOLD}Configure Chat Generation Parameters:{Colors.ENDC}")
-    defaults = {'max_length': 512, 'temperature': 0.8, 'top_k': 40, 'top_p': 0.9}
+    defaults = {'max_length': 2048, 'temperature': 0.8, 'top_k': 40, 'top_p': 0.9}
     generation_params, use_streaming = get_generation_params_interactive(defaults)
     
     while True:

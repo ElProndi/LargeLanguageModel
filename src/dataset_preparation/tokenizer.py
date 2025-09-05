@@ -16,7 +16,7 @@ except ImportError:
     sys.exit(1)
 
 
-class WikipediaTokenizer:
+class CodeLlamaTokenizer:
     """Wrapper for CodeLlama tokenizer from HuggingFace."""
     
     def __init__(self, model_name: str = "codellama/CodeLlama-7b-hf"):
@@ -243,7 +243,7 @@ def main():
     args = parser.parse_args()
     
     # Create tokenizer instance
-    tokenizer = WikipediaTokenizer()
+    tokenizer = CodeLlamaTokenizer()
     
     # Default save path
     default_path = "tokenizers/codellama_tokenizer"

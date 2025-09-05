@@ -11,17 +11,17 @@ from tqdm import tqdm
 import orjson
 
 # Import the existing tokenizer from your codebase
-from tokenizer import WikipediaTokenizer
+from .tokenizer import CodeLlamaTokenizer
 
 
 class LIMATokenizer:
     """Tokenizer for LIMA instruction dataset."""
     
-    def __init__(self, max_length: int = 512):
+    def __init__(self, max_length: int = 2048):
         """Initialize LIMA tokenizer.
         
         Args:
-            max_length: Maximum sequence length in tokens (default 512)
+            max_length: Maximum sequence length in tokens (default 2048)
         """
         self.max_length = max_length
         self.tokenizer = None
@@ -40,8 +40,8 @@ class LIMATokenizer:
         """Load CodeLlama tokenizer from saved directory."""
         tokenizer_path = Path("tokenizers/codellama_tokenizer")
         
-        # Create WikipediaTokenizer instance (wrapper for CodeLlama)
-        self.tokenizer = WikipediaTokenizer()
+        # Create CodeLlamaTokenizer instance
+        self.tokenizer = CodeLlamaTokenizer()
         
         # Load the saved tokenizer
         if not tokenizer_path.exists():
@@ -277,7 +277,7 @@ def main():
     parser.add_argument("--output", type=str,
                        default="/home/andrea/Desktop/data/post-training",
                        help="Output directory for tokenized data")
-    parser.add_argument("--max-length", type=int, default=512,
+    parser.add_argument("--max-length", type=int, default=2048,
                        help="Maximum sequence length in tokens")
     parser.add_argument("--batch-size", type=int, default=100,
                        help="Batch size for processing")

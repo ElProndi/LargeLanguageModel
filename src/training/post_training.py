@@ -17,9 +17,11 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, TensorDataset
 
 # Import project modules
-from model import create_model, TransformerLM
-from tokenizer import WikipediaTokenizer
-from utils import DualLogger, get_cosine_schedule_with_warmup, MetricsTracker
+from src.utils.model import create_model, TransformerLM
+from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+from src.utils.logging_utils import DualLogger
+from src.utils.scheduler import get_cosine_schedule_with_warmup
+from src.utils.metrics import MetricsTracker
 
 # Enable CUDA optimizations
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -33,8 +35,8 @@ class SFTTrainer:
         self,
         checkpoint_path: str,
         num_epochs: int = 1,
-        learning_rate: float = 5e-5,
-        batch_size: int = 8,
+        learning_rate: float = 1e-6,
+        batch_size: int = 16,
         experiment_name: Optional[str] = None
     ):
         """Initialize SFT trainer.
@@ -95,7 +97,7 @@ class SFTTrainer:
         
         # Load tokenizer
         print("\nLoading tokenizer...")
-        self.tokenizer = WikipediaTokenizer()
+        self.tokenizer = CodeLlamaTokenizer()
         tokenizer_path = self.pretrained_config['paths']['tokenizer_dir']
         self.tokenizer.load(tokenizer_path)
         print(f"Tokenizer loaded: vocab_size={self.tokenizer.vocab_size}")
@@ -104,10 +106,9 @@ class SFTTrainer:
         print("\nLoading LIMA dataset...")
         self.train_loader, self.val_loader, self.dataset_info = self._load_lima_data()
         
-        # Setup optimizer and scheduler
-        print("\nSetting up optimizer and scheduler...")
+        # Setup optimizer
+        print("\nSetting up optimizer...")
         self.optimizer = self._setup_optimizer()
-        self.scheduler = self._setup_scheduler()
         
         # Training state
         self.global_step = 0
@@ -217,7 +218,7 @@ class SFTTrainer:
         print(f"✓ Loaded LIMA dataset: {num_examples} examples")
         if metadata:
             print(f"  Average tokens: {metadata.get('avg_tokens', 'N/A'):.1f}")
-            print(f"  Max length: {metadata.get('max_length', 512)}")
+            print(f"  Max length: {metadata.get('max_length', 2048)}")
         
         # Convert to PyTorch tensors and move to GPU
         # Using int32 instead of int64 to save memory (vocab size < 2^31)
@@ -313,22 +314,6 @@ class SFTTrainer:
         
         return optimizer
     
-    def _setup_scheduler(self):
-        """Setup cosine learning rate scheduler with warmup."""
-        # 10% warmup for SFT
-        warmup_steps = max(1, int(self.total_steps * 0.1))
-        
-        scheduler = get_cosine_schedule_with_warmup(
-            self.optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=self.total_steps,
-            min_lr_ratio=0.1  # Don't go below 10% of initial LR
-        )
-        
-        print(f"Scheduler: Cosine with {warmup_steps} warmup steps")
-        
-        return scheduler
-    
     def train_step(self, batch: torch.Tensor) -> float:
         """Perform single training step.
         
@@ -360,7 +345,6 @@ class SFTTrainer:
         
         # Optimizer step
         self.optimizer.step()
-        self.scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
         
         return loss.item(), grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
@@ -436,20 +420,22 @@ class SFTTrainer:
         
         checkpoint_path = self.checkpoint_dir / checkpoint_name
         
-        # Prepare checkpoint data
+        # Prepare checkpoint data - matching pre-training format for compatibility
         checkpoint = {
             'epoch': self.current_epoch,
             'global_step': self.global_step,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
+            'scheduler_state_dict': None,  # SFT doesn't use scheduler, but included for format consistency
             'best_val_loss': self.best_val_loss,
+            'config': self.pretrained_config,  # Full config for compatibility with Inference.py and benchmark.py
+            'model_size': self.model_size,  # Root level for compatibility
             'pretrained_checkpoint': str(self.checkpoint_path),
             'sft_config': {
                 'num_epochs': self.num_epochs,
                 'learning_rate': self.learning_rate,
                 'batch_size': self.batch_size,
-                'model_size': self.model_size
+                'model_size': self.model_size  # Keep in sft_config too for reference
             },
             'metrics_summary': self.metrics.get_summary()
         }
@@ -501,7 +487,7 @@ class SFTTrainer:
                     self.recent_step_times.append(step_time)
                     
                     # Calculate metrics
-                    current_lr = self.optimizer.param_groups[0]['lr']
+                    current_lr = self.learning_rate  # Fixed learning rate
                     perplexity = self.metrics.calculate_perplexity(loss)
                     tokens_per_sec = batch[0].numel() / step_time
                     
@@ -543,8 +529,8 @@ class SFTTrainer:
                         smoothed = self.metrics.get_smoothed_metrics()
                         self.logger.log_scalars(smoothed, self.global_step, prefix="train")
                     
-                    # Validation every 20% of epoch
-                    if batch_idx % max(1, self.steps_per_epoch // 5) == 0 or batch_idx == self.steps_per_epoch:
+                    # Validation at end of epoch
+                    if batch_idx == self.steps_per_epoch:
                         print(f"\n{'='*70}")
                         print(f"Validation at step {self.global_step}")
                         print(f"{'='*70}")
@@ -609,10 +595,10 @@ def main():
                        help="Path to pretrained model checkpoint")
     parser.add_argument("--epochs", type=int, default=1,
                        help="Number of training epochs (default: 1)")
-    parser.add_argument("--lr", type=float, default=5e-5,
-                       help="Learning rate for fine-tuning (default: 5e-5)")
-    parser.add_argument("--batch-size", type=int, default=8,
-                       help="Batch size for training (default: 8)")
+    parser.add_argument("--lr", type=float, default=1e-6,
+                       help="Learning rate for fine-tuning (default: 1e-6)")
+    parser.add_argument("--batch-size", type=int, default=16,
+                       help="Batch size for training (default: 16)")
     parser.add_argument("--name", type=str,
                        help="Experiment name for this SFT run")
     

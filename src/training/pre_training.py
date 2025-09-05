@@ -15,10 +15,12 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 # Import project modules
-from model import create_model
-from dataloader import create_simple_train_val_dataloaders, destroy_dataloaders, get_memory_usage, calculate_dataloader_stats
-from utils import DualLogger, get_cosine_schedule_with_warmup, MetricsTracker
-from tokenizer import WikipediaTokenizer
+from src.utils.model import create_model
+from src.training.dataloader import create_simple_train_val_dataloaders, destroy_dataloaders, calculate_dataloader_stats
+from src.utils.logging_utils import DualLogger
+from src.utils.scheduler import get_cosine_schedule_with_warmup
+from src.utils.metrics import MetricsTracker
+from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision('high')
@@ -34,7 +36,7 @@ class Trainer:
         test_mode: bool = False,
         resume_from: Optional[str] = None,
         experiment_name: Optional[str] = None,
-        train_quarter: bool = False
+        train_single_subset: bool = False
     ):
         """Initialize trainer with configuration.
         
@@ -44,13 +46,13 @@ class Trainer:
             test_mode: Use smaller dataset for testing
             resume_from: Path to checkpoint to resume from
             experiment_name: Name for this training run
-            train_quarter: If True, train on single quarter only. If False (default), train on all quarters sequentially.
+            train_single_subset: If True, train on first subset only. If False (default), train on all subsets sequentially.
         """
         print(f"Initializing Transformer Language Model Trainer")
         
         # Store model size and training mode
         self.model_size = model_size
-        self.train_quarter = train_quarter
+        self.train_single_subset = train_single_subset
         
         # Load configuration
         with open(config_path, 'r') as f:
@@ -101,7 +103,7 @@ class Trainer:
         
         # Setup tokenizer for visualization during validation
         print("Loading tokenizer for validation visualization...")
-        self.tokenizer = WikipediaTokenizer()
+        self.tokenizer = CodeLlamaTokenizer()
         self.tokenizer.load(self.config['paths']['tokenizer_dir'])
         print(f"Tokenizer loaded: vocab_size={self.tokenizer.vocab_size}")
         
@@ -117,118 +119,54 @@ class Trainer:
         self.global_step = 0
         # max_steps will be calculated dynamically based on dataset size
         self.best_val_loss = float('inf')
-        self.completed_eighths = []  # Track which eighths have been completed
+        self.completed_subsets = []  # Track which subset indices have been completed
         self.recent_step_times = deque(maxlen=5)  # Track last 5 step times for ETA calculation
         
         # Get gradient accumulation steps early for correct calculations
         self.gradient_accumulation_steps = self.config['training'].get('gradient_accumulation_steps', 1)
         
         # Get dataset source from config
-        self.dataset_source = self.config.get('dataset', {}).get('source', 'wikipedia')
+        self.dataset_source = self.config.get('dataset', {}).get('source', 'fineweb')
         print(f"Using dataset: {self.dataset_source}")
         
         # Calculate training steps without loading data (optimized)
         # This avoids loading ~13GB into GPU memory just to count batches
         print("Calculating training steps...", end='')
         
-        # Get statistics for first eighth
-        first_eighth_stats = calculate_dataloader_stats(
-            batch_size=self.config['training']['batch_size'],
-            val_split=0.1,
-            test_mode=self.test_mode,
-            file_subset='first_eighth',
-            dataset_source=self.dataset_source
-        )
+        # Configure number of data subsets (default to 32)
+        self.num_data_subsets = self.config['training'].get('num_data_subsets', 32)
         
-        # Get statistics for second eighth
-        second_eighth_stats = calculate_dataloader_stats(
-            batch_size=self.config['training']['batch_size'],
-            val_split=0.1,
-            test_mode=self.test_mode,
-            file_subset='second_eighth',
-            dataset_source=self.dataset_source
-        )
-        
-        # Get statistics for third eighth
-        third_eighth_stats = calculate_dataloader_stats(
-            batch_size=self.config['training']['batch_size'],
-            val_split=0.1,
-            test_mode=self.test_mode,
-            file_subset='third_eighth',
-            dataset_source=self.dataset_source
-        )
-        
-        # Get statistics for fourth eighth
-        fourth_eighth_stats = calculate_dataloader_stats(
-            batch_size=self.config['training']['batch_size'],
-            val_split=0.1,
-            test_mode=self.test_mode,
-            file_subset='fourth_eighth',
-            dataset_source=self.dataset_source
-        )
-        
-        # Get statistics for fifth eighth
-        fifth_eighth_stats = calculate_dataloader_stats(
-            batch_size=self.config['training']['batch_size'],
-            val_split=0.1,
-            test_mode=self.test_mode,
-            file_subset='fifth_eighth',
-            dataset_source=self.dataset_source
-        )
-        
-        # Get statistics for sixth eighth
-        sixth_eighth_stats = calculate_dataloader_stats(
-            batch_size=self.config['training']['batch_size'],
-            val_split=0.1,
-            test_mode=self.test_mode,
-            file_subset='sixth_eighth',
-            dataset_source=self.dataset_source
-        )
-        
-        # Get statistics for seventh eighth
-        seventh_eighth_stats = calculate_dataloader_stats(
-            batch_size=self.config['training']['batch_size'],
-            val_split=0.1,
-            test_mode=self.test_mode,
-            file_subset='seventh_eighth',
-            dataset_source=self.dataset_source
-        )
-        
-        # Get statistics for eighth eighth
-        eighth_eighth_stats = calculate_dataloader_stats(
-            batch_size=self.config['training']['batch_size'],
-            val_split=0.1,
-            test_mode=self.test_mode,
-            file_subset='eighth_eighth',
-            dataset_source=self.dataset_source
-        )
+        # Get statistics for all subsets
+        subset_stats = []
+        for subset_idx in range(self.num_data_subsets):
+            stats = calculate_dataloader_stats(
+                batch_size=self.config['training']['batch_size'],
+                val_split=0.1,
+                test_mode=self.test_mode,
+                subset_index=subset_idx,
+                num_subsets=self.num_data_subsets
+            )
+            subset_stats.append(stats)
         
         # Calculate batch counts and dynamic max_steps based on actual dataset size
         num_epochs = self.config['training'].get('num_epochs', 1)
         
-        if self.train_quarter:
-            # Train on single quarter only - calculate steps for first eighth
-            self.batches_per_epoch = first_eighth_stats['train_batches']
+        if self.train_single_subset:
+            # Train on single subset only - calculate steps for first subset
+            self.batches_per_epoch = subset_stats[0]['train_batches']
             self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
             if self.batches_per_epoch % self.gradient_accumulation_steps != 0:
                 self.steps_per_epoch += 1
             
-            # Set max_steps for single quarter with epochs
+            # Set max_steps for single subset with epochs
             self.max_steps = self.steps_per_epoch * num_epochs
             self.total_training_steps = self.max_steps
             
             if not resume_from:
-                print(f"  • Training on first_eighth only: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
+                print(f"  • Training on subset 1/{self.num_data_subsets} only: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
         else:
-            # Train on all eighths sequentially - sum all eight eighths
-            self.batches_per_epoch = (first_eighth_stats['train_batches'] + 
-                                       second_eighth_stats['train_batches'] + 
-                                       third_eighth_stats['train_batches'] + 
-                                       fourth_eighth_stats['train_batches'] + 
-                                       fifth_eighth_stats['train_batches'] + 
-                                       sixth_eighth_stats['train_batches'] + 
-                                       seventh_eighth_stats['train_batches'] + 
-                                       eighth_eighth_stats['train_batches'])
+            # Train on all subsets sequentially - sum all subsets
+            self.batches_per_epoch = sum(stats['train_batches'] for stats in subset_stats)
             
             # With gradient accumulation, optimizer steps = batches / accumulation_steps
             self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
@@ -236,12 +174,12 @@ class Trainer:
             if self.batches_per_epoch % self.gradient_accumulation_steps != 0:
                 self.steps_per_epoch += 1
             
-            # Set max_steps for all quarters with epochs
+            # Set max_steps for all subsets with epochs
             self.max_steps = self.steps_per_epoch * num_epochs
             self.total_training_steps = self.max_steps
             
             if not resume_from:
-                print(f"  • Training on all 8 eighths: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
+                print(f"  • Training on all {self.num_data_subsets} subsets: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
         
         # Validation frequency: doubled - every 500 steps (or less for test mode)
         if self.test_mode:
@@ -291,14 +229,6 @@ class Trainer:
         )
         # No need to call model.to(device) - model is already on GPU
         
-        # Enable gradient checkpointing based on config
-        architecture_features = self.config.get('architecture_features', {})
-        if architecture_features.get('use_gradient_checkpointing', False):
-            model.enable_gradient_checkpointing()  # Enable for significant memory savings
-            print("✓ Gradient checkpointing enabled (from config)")
-        else:
-            print("✓ Gradient checkpointing disabled (from config)")
-        
         # Model compilation (commented out by default)
         # Uncomment to enable torch.compile for faster training:
 
@@ -307,16 +237,21 @@ class Trainer:
         
         return model
     
-    def _create_dataloaders(self, file_subset: str = 'first_eighth') -> Tuple[DataLoader, DataLoader, Dict]:
+    def _create_dataloaders(self, subset_index: int = 0, num_subsets: int = None) -> Tuple[DataLoader, DataLoader, Dict]:
         """Create train and validation data loaders for specified subset.
         
         Args:
-            file_subset: Which files to load ('first_eighth', 'second_eighth', ..., 'eighth_eighth')
+            subset_index: 0-based index of the subset to load
+            num_subsets: Total number of subsets (defaults to self.num_data_subsets)
         
         Returns:
             Tuple of (train_loader, val_loader, info_dict)
         """
-        print(f"\nLoading data subset: {file_subset}")
+        if num_subsets is None:
+            num_subsets = self.num_data_subsets
+        
+        subset_desc = f"subset {subset_index+1}/{num_subsets}"
+        print(f"\nLoading data: {subset_desc}")
         
         # Create dataloaders for the specified subset
         train_loader, val_loader, info = create_simple_train_val_dataloaders(
@@ -326,8 +261,8 @@ class Trainer:
             test_mode=self.test_mode,
             verbose=True,
             seed=42,  # Consistent split across runs
-            file_subset=file_subset,  # Load only specified eighth
-            dataset_source=self.dataset_source  # Use configured dataset source
+            subset_index=subset_index,  # Load only specified subset
+            num_subsets=num_subsets  # Total number of subsets
         )
         
         # Store references
@@ -335,31 +270,24 @@ class Trainer:
         self.val_loader = val_loader
         self.train_dataset = info['train_dataset']
         self.val_dataset = info['val_dataset']
-        self.current_data_subset = file_subset
+        self.current_data_subset_index = subset_index
         self.dataloader_info = info
-        
-        # Show summary after loading
-        mem_stats_after = get_memory_usage()
-        if 'gpu_allocated_gb' in mem_stats_after:
-            gpu_mem = mem_stats_after['gpu_allocated_gb']
-            print(f"  Loaded {info['num_files_loaded']} files | "
-                  f"Train: {info['train_size']:,} on {info['train_device']} | "
-                  f"Val: {info['val_size']:,} on {info['val_device']} | "
-                  f"GPU: {gpu_mem:.1f}GB")
         
         return train_loader, val_loader, info
     
-    def _switch_data_subset(self, new_subset: str):
+    def _switch_data_subset(self, new_subset_index: int):
         """Switch to a different data subset, destroying old dataloaders first.
         
         Args:
-            new_subset: Which subset to switch to ('first_eighth', 'second_eighth', ..., 'eighth_eighth')
+            new_subset_index: 0-based index of the subset to switch to
         """
-        if self.current_data_subset == new_subset:
-            print(f"Already using {new_subset}, skipping switch")
+        if hasattr(self, 'current_data_subset_index') and self.current_data_subset_index == new_subset_index:
+            print(f"Already using subset {new_subset_index+1}/{self.num_data_subsets}, skipping switch")
             return
         
-        print(f"\nSwitching data subset: {self.current_data_subset} → {new_subset}")
+        old_desc = f"subset {self.current_data_subset_index+1}/{self.num_data_subsets}" if hasattr(self, 'current_data_subset_index') else "unknown"
+        new_desc = f"subset {new_subset_index+1}/{self.num_data_subsets}"
+        print(f"\nSwitching data: {old_desc} → {new_desc}")
         
         # Destroy current dataloaders if they exist
         if self.train_loader is not None:
@@ -383,7 +311,7 @@ class Trainer:
             torch.cuda.empty_cache()
         
         # Create new dataloaders for the new subset
-        self._create_dataloaders(new_subset)
+        self._create_dataloaders(new_subset_index)
     
     def _setup_optimizer(self) -> torch.optim.Optimizer:
         """Setup AdamW optimizer with weight decay.
@@ -545,23 +473,23 @@ class Trainer:
                 print("="*80)
                 
                 # Get the first sequence from the batch
-                input_sequence = batch[0]  # Shape: [512]
+                input_sequence = batch[0]  # Shape: [2048]
                 
                 # Get model predictions
-                logits = outputs['logits'][0]  # Shape: [512, vocab_size]
-                predicted_tokens = torch.argmax(logits, dim=-1)  # Shape: [512]
+                logits = outputs['logits'][0]  # Shape: [2048, vocab_size]
+                predicted_tokens = torch.argmax(logits, dim=-1)  # Shape: [2048]
                 
                 # For language modeling, predictions are for the NEXT token
                 # So predicted_tokens[i] is the prediction for what comes after input_sequence[i]
                 
                 # Decode tokens to text
-                # Input: positions 0-511
-                # Predictions: what comes after positions 0-511 (so predictions for positions 1-512)
+                # Input: positions 0-2047
+                # Predictions: what comes after positions 0-2047 (so predictions for positions 1-2048)
                 input_text = self.tokenizer.decode(input_sequence.cpu().tolist(), skip_special_tokens=False)
                 
                 # For display, we'll show:
-                # - Input tokens 0-510 (all but last)
-                # - Target tokens 1-511 (what should come next)
+                # - Input tokens 0-2046 (all but last)
+                # - Target tokens 1-2047 (what should come next)
                 # - Predicted tokens for positions 1-511
                 input_display = input_sequence[:-1].cpu().tolist()  # Tokens 0-510
                 target_display = input_sequence[1:].cpu().tolist()  # Tokens 1-511 (targets)
@@ -638,8 +566,8 @@ class Trainer:
         # Prepare checkpoint data
         checkpoint = {
             'global_step': self.global_step,
-            'current_data_subset': self.current_data_subset,  # Save which subset we're on
-            'completed_eighths': self.completed_eighths,  # Save completed eighths list
+            'current_data_subset_index': self.current_data_subset_index,  # Save which subset index we're on
+            'completed_subsets': self.completed_subsets,  # Save completed subset indices
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
@@ -749,26 +677,26 @@ class Trainer:
         self.global_step = checkpoint['global_step']
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         
-        # Restore completed eighths list (with backward compatibility for old checkpoints)
-        self.completed_eighths = checkpoint.get('completed_eighths', checkpoint.get('completed_fourths', []))
+        # Restore completed subsets list
+        self.completed_subsets = checkpoint.get('completed_subsets', [])
         
         # Clear step times for fresh ETA calculation after resume
         self.recent_step_times.clear()
         
         # Restore data subset state if available
-        saved_subset = checkpoint.get('current_data_subset', 'first_eighth')
+        saved_subset_idx = checkpoint.get('current_data_subset_index', 0)
+        if not isinstance(saved_subset_idx, int):
+            saved_subset_idx = 0
         
-        # Check if current eighth is already complete and move to next if needed
-        data_eighths = ['first_eighth', 'second_eighth', 'third_eighth', 'fourth_eighth', 'fifth_eighth', 'sixth_eighth', 'seventh_eighth', 'eighth_eighth']
-        if saved_subset in self.completed_eighths:
-            current_idx = data_eighths.index(saved_subset)
-            if current_idx < len(data_eighths) - 1:
-                next_subset = data_eighths[current_idx + 1]
-                print(f"  {saved_subset} already complete, moving to {next_subset}")
-                saved_subset = next_subset
+        # Check if current subset is already complete and move to next if needed
+        if saved_subset_idx in self.completed_subsets:
+            if saved_subset_idx < self.num_data_subsets - 1:
+                next_subset_idx = saved_subset_idx + 1
+                print(f"  Subset {saved_subset_idx+1} already complete, moving to subset {next_subset_idx+1}")
+                saved_subset_idx = next_subset_idx
             else:
-                print(f"  All eighths completed! Training is finished.")
-                saved_subset = 'eighth_eighth'  # Stay on last eighth
+                print(f"  All subsets completed! Training is finished.")
+                saved_subset_idx = self.num_data_subsets - 1  # Stay on last subset
         
         # Recalculate steps dynamically based on train_quarter flag and remaining data
         from dataloader import calculate_dataloader_stats
@@ -776,68 +704,67 @@ class Trainer:
         # Get num_epochs from config
         num_epochs = self.config['training'].get('num_epochs', 1)
         
-        if self.train_quarter:
-            # Train on single quarter only
-            current_eighth_stats = calculate_dataloader_stats(
+        if self.train_single_subset:
+            # Train on single subset only
+            current_subset_stats = calculate_dataloader_stats(
                 batch_size=self.config['training']['batch_size'],
                 val_split=0.1,
                 test_mode=self.test_mode,
-                file_subset=saved_subset,
-                dataset_source=self.dataset_source
+                subset_index=saved_subset_idx,
+                num_subsets=self.num_data_subsets
             )
             
-            steps_in_current_eighth = current_eighth_stats['train_batches'] // self.gradient_accumulation_steps
-            if current_eighth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
-                steps_in_current_eighth += 1
+            steps_in_current_subset = current_subset_stats['train_batches'] // self.gradient_accumulation_steps
+            if current_subset_stats['train_batches'] % self.gradient_accumulation_steps != 0:
+                steps_in_current_subset += 1
             
-            # For train_quarter mode, complete the remaining steps of the current eighth
+            # For single subset mode, complete the remaining steps of the current subset
             # accounting for the epochs
-            self.max_steps = steps_in_current_eighth * num_epochs
+            self.max_steps = steps_in_current_subset * num_epochs
             self.total_training_steps = self.max_steps
         else:
-            # Train on all eighths sequentially
-            # Calculate total steps for ALL eighths (not just remaining)
-            data_eighths = ['first_eighth', 'second_eighth', 'third_eighth', 'fourth_eighth', 'fifth_eighth', 'sixth_eighth', 'seventh_eighth', 'eighth_eighth']
+            # Train on all subsets sequentially
+            # Calculate total steps for ALL subsets (not just remaining)
             total_steps = 0
             
-            for eighth in data_eighths:
-                eighth_stats = calculate_dataloader_stats(
+            for subset_idx in range(self.num_data_subsets):
+                subset_stats = calculate_dataloader_stats(
                     batch_size=self.config['training']['batch_size'],
                     val_split=0.1,
                     test_mode=self.test_mode,
-                    file_subset=eighth,
-                    dataset_source=self.dataset_source
+                    subset_index=subset_idx,
+                    num_subsets=self.num_data_subsets
                 )
-                steps_in_eighth = eighth_stats['train_batches'] // self.gradient_accumulation_steps
-                if eighth_stats['train_batches'] % self.gradient_accumulation_steps != 0:
-                    steps_in_eighth += 1
-                total_steps += steps_in_eighth
+                steps_in_subset = subset_stats['train_batches'] // self.gradient_accumulation_steps
+                if subset_stats['train_batches'] % self.gradient_accumulation_steps != 0:
+                    steps_in_subset += 1
+                total_steps += steps_in_subset
             
-            # Set max_steps for all quarters with epochs
+            # Set max_steps for all subsets with epochs
             self.max_steps = total_steps * num_epochs
             self.total_training_steps = self.max_steps
         
         print(f"  Resumed from step {self.global_step}")
         print(f"  Best validation loss: {self.best_val_loss:.4f}")
-        print(f"  Data subset: {saved_subset}")
-        print(f"  Completed eighths: {self.completed_eighths}")
+        print(f"  Data subset: {saved_subset_idx+1}/{self.num_data_subsets}")
+        print(f"  Completed subsets: {self.completed_subsets}")
         
         # Calculate progress information
         remaining_steps = self.max_steps - self.global_step
         progress_percent = (self.global_step / self.max_steps * 100) if self.max_steps > 0 else 0
         
-        if self.train_quarter:
-            print(f"  Mode: Single quarter training")
+        if self.train_single_subset:
+            print(f"  Mode: Single subset training")
             print(f"  Progress: {self.global_step}/{self.max_steps} steps ({progress_percent:.1f}%)")
             print(f"  Remaining: {remaining_steps} steps")
         else:
-            print(f"  Mode: All quarters training ({num_epochs} epoch{'s' if num_epochs > 1 else ''})")
+            print(f"  Mode: All {self.num_data_subsets} subsets training ({num_epochs} epoch{'s' if num_epochs > 1 else ''})")
             print(f"  Progress: {self.global_step}/{self.max_steps} steps ({progress_percent:.1f}%)")
             print(f"  Remaining: {remaining_steps} steps")
         
         # Load the appropriate data subset
-        if saved_subset:
-            self._create_dataloaders(saved_subset)
+        if saved_subset_idx is not None:
+            self._create_dataloaders(saved_subset_idx)
         
         # Check if already completed
         if self.global_step >= self.max_steps:
@@ -863,34 +790,32 @@ class Trainer:
         iteration_start_time = None  # Track timing across accumulation
         
         # Training loop - continue until max_steps reached
-        data_eighths = ['first_eighth', 'second_eighth', 'third_eighth', 'fourth_eighth', 'fifth_eighth', 'sixth_eighth', 'seventh_eighth', 'eighth_eighth']
-        current_eighth_idx = data_eighths.index(self.current_data_subset) if hasattr(self, 'current_data_subset') and self.current_data_subset else 0
+        current_subset_idx = getattr(self, 'current_data_subset_index', 0)
         
         try:
             while self.global_step < self.max_steps:
-                # Cycle through data eighths continuously
-                for eighth_idx in range(current_eighth_idx, len(data_eighths)):
-                    data_eighth = data_eighths[eighth_idx]
+                # Cycle through data subsets continuously
+                for subset_idx in range(current_subset_idx, self.num_data_subsets):
                     
-                    # Check if we've reached max_steps before processing new eighth
+                    # Check if we've reached max_steps before processing new subset
                     if self.global_step >= self.max_steps:
                         break
                     
-                    # Skip already completed eighths
-                    if data_eighth in self.completed_eighths:
-                        print(f"Skipping already completed {data_eighth}")
+                    # Skip already completed subsets
+                    if subset_idx in self.completed_subsets:
+                        print(f"Skipping already completed subset {subset_idx+1}/{self.num_data_subsets}")
                         continue
                     
                     # Load the appropriate data subset
-                    if self.current_data_subset != data_eighth:
+                    if not hasattr(self, 'current_data_subset_index') or self.current_data_subset_index != subset_idx:
                         if self.train_loader is None:
                             # First time loading data
-                            self._create_dataloaders(data_eighth)
+                            self._create_dataloaders(subset_idx)
                         else:
                             # Switch to new subset
-                            self._switch_data_subset(data_eighth)
+                            self._switch_data_subset(subset_idx)
                     
-                    print(f"\nTraining on {data_eighth} (Step {self.global_step}/{self.max_steps})")
+                    print(f"\nTraining on subset {subset_idx+1}/{self.num_data_subsets} (Step {self.global_step}/{self.max_steps})")
                     print(f"{'─'*50}")
                     
                     # Training on current data subset
@@ -959,7 +884,7 @@ class Trainer:
                                 # Calculate average time per step
                                 avg_step_time = sum(self.recent_step_times) / len(self.recent_step_times)
                                 
-                                # Calculate remaining steps for current eighth
+                                # Calculate remaining steps for current subset
                                 remaining_steps = self.max_steps - self.global_step
                                 
                                 if remaining_steps > 0:
@@ -979,25 +904,15 @@ class Trainer:
                                 else:
                                     eta_str = " | ETA: Complete"
                             
-                            # Map eighth names to fractions for cleaner display
-                            eighth_labels = {
-                                'first_eighth': '1/8',
-                                'second_eighth': '2/8',
-                                'third_eighth': '3/8',
-                                'fourth_eighth': '4/8',
-                                'fifth_eighth': '5/8',
-                                'sixth_eighth': '6/8',
-                                'seventh_eighth': '7/8',
-                                'eighth_eighth': '8/8'
-                            }
-                            eighth_label = eighth_labels.get(data_eighth, data_eighth)
+                            # Create fraction label for display
+                            subset_label = f"{subset_idx+1}/{self.num_data_subsets}"
                             
                             # Get current learning rate
                             current_lr = self.optimizer.param_groups[0]['lr']
                             
                             # Print step metrics with data subset indicator, learning rate, and ETA
                             # Time shown is TOTAL time for all gradient accumulation steps
-                            print(f"[{eighth_label:3s}] Step {self.global_step:5d}/{self.total_training_steps} | "
+                            print(f"[{subset_label:5s}] Step {self.global_step:5d}/{self.total_training_steps} | "
                                   f"{iteration_time * 1000:6.0f}ms | "
                                   f"Loss: {avg_loss:7.4f} | "
                                   f"LR: {current_lr:.2e} | "
@@ -1016,7 +931,7 @@ class Trainer:
                             # validation_interval is already correctly calculated in __init__
                             if self.global_step > 0 and self.global_step % self.validation_interval == 0:
                                 print(f"\n{'='*70}")
-                                print(f"Validation at step {self.global_step} (on {data_eighth})")
+                                print(f"Validation at step {self.global_step} (on subset {subset_idx+1}/{self.num_data_subsets})")
                                 print(f"{'='*70}")
                                 
                                 # Run validation on current subset's validation split
@@ -1050,35 +965,35 @@ class Trainer:
                             accumulated_loss = 0.0
                             accumulated_tokens = 0
                     
-                    # After processing all batches in this eighth, mark it as complete
-                    if data_eighth not in self.completed_eighths:
-                        self.completed_eighths.append(data_eighth)
-                        print(f"\n✓ Completed {data_eighth}")
-                        print(f"Saving checkpoint after completing {data_eighth}...")
-                        self.save_checkpoint(f"checkpoint_{data_eighth}_complete.pt")
+                    # After processing all batches in this subset, mark it as complete
+                    if subset_idx not in self.completed_subsets:
+                        self.completed_subsets.append(subset_idx)
+                        print(f"\n✓ Completed subset {subset_idx+1}/{self.num_data_subsets}")
+                        print(f"Saving checkpoint after completing subset {subset_idx+1}...")
+                        self.save_checkpoint(f"checkpoint_subset_{subset_idx+1}_complete.pt")
                         
-                        # Check if we've completed all eighths
-                        if len(self.completed_eighths) == 8:
-                            print(f"\n🎉 All eighths completed! Training finished.")
+                        # Check if we've completed all subsets
+                        if len(self.completed_subsets) == self.num_data_subsets:
+                            print(f"\n🎉 All {self.num_data_subsets} subsets completed! Training finished.")
                             break
                 
-                # Check if we should continue or stop based on train_quarter flag
+                # Check if we should continue or stop based on train_single_subset flag
                 if self.global_step >= self.max_steps:
-                    if self.train_quarter:
-                        print(f"\nCompleted current eighth. Stopping training (--train-quarter mode).")
+                    if self.train_single_subset:
+                        print(f"\nCompleted current subset. Stopping training (single subset mode).")
                         break
                     else:
-                        # In full training mode, we've completed all eighths
-                        print(f"\nCompleted all training steps across all eighths.")
+                        # In full training mode, we've completed all subsets
+                        print(f"\nCompleted all training steps across all subsets.")
                         break
                 
-                # Reset to first_eighth for next epoch if not in train_quarter mode
-                if not self.train_quarter and eighth_idx == len(data_eighths) - 1:
-                    # Completed all eighths but haven't reached max_steps
+                # Reset to first subset for next epoch if not in single subset mode
+                if not self.train_single_subset and subset_idx == self.num_data_subsets - 1:
+                    # Completed all subsets but haven't reached max_steps
                     # Reset for another pass through the data
-                    current_eighth_idx = 0
-                    self.completed_eighths = []  # Reset completed eighths for next epoch
-                    print(f"\nStarting new epoch through all eighths...")
+                    current_subset_idx = 0
+                    self.completed_subsets = []  # Reset completed subsets for next epoch
+                    print(f"\nStarting new epoch through all {self.num_data_subsets} subsets...")
         
         except KeyboardInterrupt:
             print("\n\nTraining interrupted by user")
@@ -1124,8 +1039,8 @@ def main():
                        help='Path to checkpoint to resume from')
     parser.add_argument('--name', type=str, default=None,
                        help='Experiment name for logging')
-    parser.add_argument('--train-quarter', action='store_true',
-                       help='Train on single quarter of dataset only (default: train on all quarters sequentially)')
+    parser.add_argument('--train-single', action='store_true',
+                       help='Train on first subset only (default: train on all subsets sequentially)')
     
     args = parser.parse_args()
     
@@ -1136,7 +1051,7 @@ def main():
         test_mode=args.test,
         resume_from=args.resume,
         experiment_name=args.name,
-        train_quarter=args.train_quarter
+        train_single_subset=args.train_single
     )
     
     trainer.train()

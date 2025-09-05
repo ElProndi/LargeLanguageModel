@@ -21,8 +21,8 @@ from tqdm import tqdm
 import urllib.request
 
 # Import model loading utilities from Inference
-from model import TransformerLM
-from tokenizer import WikipediaTokenizer
+from src.utils.model import TransformerLM
+from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
 
 
 class BenchmarkDatasets:
@@ -89,14 +89,14 @@ class BenchmarkDatasets:
     
 
 
-def _load_tokenizer() -> WikipediaTokenizer:
+def _load_tokenizer() -> CodeLlamaTokenizer:
     """Load or download the CodeLlama tokenizer.
     
     Returns:
-        Loaded WikipediaTokenizer instance
+        Loaded CodeLlamaTokenizer instance
     """
     print("Loading tokenizer...")
-    tokenizer = WikipediaTokenizer()
+    tokenizer = CodeLlamaTokenizer()
     tokenizer_path = Path("tokenizers/codellama_tokenizer")
     
     if tokenizer_path.exists():
@@ -115,7 +115,7 @@ def _load_tokenizer() -> WikipediaTokenizer:
     return tokenizer
 
 
-def load_model_from_checkpoint(checkpoint_path: Union[str, Path], device: torch.device) -> Tuple[TransformerLM, WikipediaTokenizer]:
+def load_model_from_checkpoint(checkpoint_path: Union[str, Path], device: torch.device) -> Tuple[TransformerLM, CodeLlamaTokenizer]:
     """Load model from checkpoint with proper architecture handling.
     
     Args:
@@ -155,7 +155,6 @@ def load_model_from_checkpoint(checkpoint_path: Union[str, Path], device: torch.
     # Extract actual intermediate_size from the checkpoint's state_dict
     state_dict = checkpoint['model_state_dict']
     intermediate_size = None
-    use_scaled_residuals = False
     
     # Check for FFN layer dimensions to determine actual intermediate_size
     for key in state_dict.keys():
@@ -168,24 +167,8 @@ def load_model_from_checkpoint(checkpoint_path: Union[str, Path], device: torch.
             intermediate_size = state_dict[key].shape[0]
             break
     
-    # Check for residual scaling in checkpoint
-    use_scaled_residuals = any('residual_scale' in key for key in state_dict.keys())
-    
-    # Read Flash Attention setting from checkpoint config (required)
-    if 'use_flash_attention' not in architecture_features:
-        raise ValueError(
-            f"Missing 'use_flash_attention' in checkpoint's architecture_features. "
-            f"Available features: {list(architecture_features.keys())}"
-        )
-    
-    use_flash_attention_inference = architecture_features['use_flash_attention']
-    
-    # Disable KV caching when Flash Attention is enabled (they're mutually exclusive)
-    use_kv_cache = not use_flash_attention_inference
-    
     # Log the settings being used
-    print(f"  Flash Attention: {'✓ Enabled' if use_flash_attention_inference else '✗ Disabled'}")
-    print(f"  KV Caching: {'✓ Enabled' if use_kv_cache else '✗ Disabled (Flash Attention active)'}")
+    print(f"  Flash Attention: ✓ Always Enabled")
     print(f"  Compilation: ✗ Disabled (benchmark mode)")
     
     # Create model with all architecture parameters from config
@@ -194,27 +177,19 @@ def load_model_from_checkpoint(checkpoint_path: Union[str, Path], device: torch.
         hidden_size=model_config['hidden_size'],
         num_layers=model_config['num_layers'],
         num_heads=model_config['num_heads'],
-        # CRITICAL: Pass num_kv_heads to match trained model architecture
-        num_kv_heads=model_config.get('num_kv_heads', model_config['num_heads']),
         # Pass detected or configured intermediate_size
         intermediate_size=intermediate_size,  # Use detected size from checkpoint
         max_position_embeddings=model_config['max_position_embeddings'],
         # RoPE configuration
         rope_theta=rope_config.get('theta', 10000.0),
         rope_scaling=rope_config.get('scaling_factor', 1.0),
-        # Use detected residual scaling setting
-        use_scaled_residuals=use_scaled_residuals,
         # Architecture features from config - CRITICAL for correct model reconstruction
-        use_gqa=architecture_features.get('use_gqa', True),
-        use_flash_attention=use_flash_attention_inference,  # Use inference-specific setting
         tie_embeddings=architecture_features.get('tie_embeddings', True),
-        use_gradient_checkpointing=architecture_features.get('use_gradient_checkpointing', False),
         # Disable dropout for inference
         dropout=0.0,
         attention_dropout=0.0,
         layer_norm_eps=model_config['layer_norm_eps'],
         initializer_range=model_config['initializer_range'],
-        use_cache=use_kv_cache,  # Disabled when Flash Attention is active
         pad_token_id=tokenizer_config.get('pad_token_id', 2)  # Same as EOS token (CodeLlama convention)
     )
     
@@ -315,7 +290,7 @@ class ModelBenchmark:
     def load_models_from_checkpoints(
         self,
         checkpoint_paths: Union[List[Union[str, Path]], Dict[str, Union[str, Path]]]
-    ) -> Dict[str, Tuple[TransformerLM, WikipediaTokenizer]]:
+    ) -> Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]]:
         """
         Load multiple models from checkpoint files.
         
