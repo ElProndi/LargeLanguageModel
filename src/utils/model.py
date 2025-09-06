@@ -76,9 +76,7 @@ class MultiHeadAttention(nn.Module):
     
     def forward(
         self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        is_causal: bool = True
+        hidden_states: torch.Tensor
     ) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
         
@@ -86,34 +84,26 @@ class MultiHeadAttention(nn.Module):
         # Output: (batch, seq_len, 3 * hidden_size)
         qkv = self.qkv_proj(hidden_states)
         
-        # Split QKV into Q, K, V components
-        # Each will be (batch, seq_len, hidden_size)
-        q, k, v = qkv.chunk(3, dim=-1)
-        
-        # Reshape Q, K, V to (batch, num_heads, seq_len, head_dim)
-        q = q.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
-        q = q.transpose(1, 2)
-        
-        k = k.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = k.transpose(1, 2)
-        
-        v = v.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
-        v = v.transpose(1, 2)
+        # Efficient QKV reshape: single view + permute instead of chunk + 6 ops
+        # Reshape from (batch, seq_len, 3 * hidden_size) to (batch, seq_len, 3, num_heads, head_dim)
+        qkv = qkv.view(batch_size, seq_len, 3, self.num_heads, self.head_dim)
+        # Permute to (3, batch, num_heads, seq_len, head_dim) and unpack
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)
         
         # Apply RoPE to Q and K
         q, k = self.rotary_emb(q, k, position_offset=0)
         
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=attention_mask,
+            attn_mask=None,
             dropout_p=self.dropout if self.training else 0.0,
-            is_causal=is_causal and attention_mask is None,
+            is_causal=True,  # Always use causal masking for language modeling
             scale=self.scale
         )
         
         # Reshape back to (batch, seq_len, hidden_size)
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(batch_size, seq_len, self.hidden_size)
+        # More efficient: single operation instead of transpose + contiguous + reshape
+        attn_output = attn_output.transpose(1, 2).flatten(2)
         output = self.o_proj(attn_output)
         
         return output
@@ -134,12 +124,18 @@ class TransformerLayer(nn.Module):
         layer_norm_eps: float = 1e-5,
         max_position_embeddings: int = 2048,
         rope_theta: float = 10000.0,
-        rope_scaling: float = 1.0
+        rope_scaling: float = 1.0,
+        layer_idx: int = 0,
+        num_layers: int = 1
     ):
         super().__init__()
         
         if intermediate_size is None:
             intermediate_size = hidden_size * 4
+        
+        # Store layer index for layer-dependent initialization
+        self.layer_idx = layer_idx
+        self.num_layers = num_layers
         
         # Self-attention components with RoPE
         self.self_attn = MultiHeadAttention(
@@ -150,6 +146,9 @@ class TransformerLayer(nn.Module):
             rope_theta=rope_theta,
             rope_scaling=rope_scaling
         )
+        # Mark attention module with layer index
+        self.self_attn._layer_idx = layer_idx
+        self.self_attn._num_layers = num_layers
         
         # Feed-forward network - always use SwiGLU for better gradient flow
         self.ffn = SwiGLU(
@@ -158,6 +157,9 @@ class TransformerLayer(nn.Module):
             bias=False,  # No bias for better kernel fusion and memory savings
             dropout=dropout
         )
+        # Mark FFN module with layer index
+        self.ffn._layer_idx = layer_idx
+        self.ffn._num_layers = num_layers
         
         # Always use RMSNorm for better efficiency
         self.norm1 = nn.RMSNorm(hidden_size, eps=layer_norm_eps)
@@ -168,9 +170,7 @@ class TransformerLayer(nn.Module):
     
     def forward(
         self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        is_causal: bool = True
+        hidden_states: torch.Tensor
     ) -> torch.Tensor:
         # Attention block with pre-norm
         residual = hidden_states
@@ -178,9 +178,7 @@ class TransformerLayer(nn.Module):
         
         # Self-attention
         hidden_states = self.self_attn(
-            hidden_states,
-            attention_mask=attention_mask,
-            is_causal=is_causal
+            hidden_states
         )
         
         hidden_states = self.dropout(hidden_states)
@@ -235,7 +233,9 @@ class TransformerDecoder(nn.Module):
                 layer_norm_eps=layer_norm_eps,
                 max_position_embeddings=max_position_embeddings,
                 rope_theta=rope_theta,
-                rope_scaling=rope_scaling
+                rope_scaling=rope_scaling,
+                layer_idx=i,
+                num_layers=num_layers
             )
             for i in range(num_layers)
         ])
@@ -245,16 +245,12 @@ class TransformerDecoder(nn.Module):
     
     def forward(
         self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        is_causal: bool = True
+        hidden_states: torch.Tensor
     ) -> torch.Tensor:
         # Process through each layer
         for layer in self.layers:
             hidden_states = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                is_causal=is_causal
+                hidden_states
             )
         
         # Apply final layer norm
@@ -346,29 +342,79 @@ class TransformerLM(nn.Module):
         
         # Calculate depth-dependent scaling for output projections
         num_layers = self.config['num_layers']
-        depth_scale = 1.0 / math.sqrt(2 * num_layers) if num_layers > 1 else 1.0
+        depth_scale = 1.0 / math.sqrt(num_layers) if num_layers > 1 else 1.0
+        
+        # Get layer-specific scaling if module has layer index
+        layer_scale = 1.0
+        if hasattr(module, '_layer_idx'):
+            # Progressive scaling: early layers get larger variance, late layers get smaller
+            # This helps early layers learn features while late layers fine-tune
+            layer_idx = module._layer_idx
+            layer_scale = 1.0 - 0.1 * (layer_idx / num_layers)
         
         if isinstance(module, nn.Linear):
             # Check if this is part of attention mechanism
             if hasattr(module, '_is_attention_qkv'):
-                # Query, Key, Value projections - use scaled initialization
-                fan_in = module.weight.size(1)
-                fan_out = module.weight.size(0)
-                std = math.sqrt(2.0 / (fan_in + fan_out))
-                module.weight.data.normal_(mean=0.0, std=std)
+                # Query, Key, Value projections - improved attention-aware initialization
+                # Account for head dimension and attention score scaling
+                head_dim = self.config['hidden_size'] // self.config['num_heads']
+                
+                # Apply layer-dependent scaling to attention
+                parent = module
+                while parent is not None:
+                    if hasattr(parent, '_layer_idx'):
+                        layer_idx = parent._layer_idx
+                        layer_scale = 1.0 - 0.1 * (layer_idx / num_layers)
+                        break
+                    parent = getattr(parent, '_parent', None)
+                
+                # Scale initialization to account for attention score computation:
+                # - Queries and keys will be dot-producted and scaled by 1/sqrt(head_dim)
+                # - We want attention scores to have reasonable magnitude before softmax
+                # - Use smaller std for Q,K to prevent attention saturation, normal std for V
+                
+                # The QKV projection outputs [Q, K, V] concatenated
+                # So we initialize the entire weight matrix, but conceptually:
+                # - Q and K portions: smaller variance to control attention score magnitude  
+                # - V portion: standard variance since it doesn't affect attention scores
+                std_qk = self.config['initializer_range'] * layer_scale / math.sqrt(head_dim / 64.0)  # Scale relative to typical head_dim=64
+                std_v = self.config['initializer_range'] * layer_scale
+                
+                # Initialize Q,K portions with smaller variance, V with standard variance
+                weight = module.weight.data
+                hidden_size = self.config['hidden_size']
+                
+                # Split weight into Q, K, V portions (each is hidden_size x hidden_size)
+                q_weight = weight[:hidden_size, :]  # First 1/3
+                k_weight = weight[hidden_size:2*hidden_size, :]  # Second 1/3  
+                v_weight = weight[2*hidden_size:, :]  # Last 1/3
+                
+                # Initialize each portion separately
+                q_weight.normal_(mean=0.0, std=std_qk)
+                k_weight.normal_(mean=0.0, std=std_qk)
+                v_weight.normal_(mean=0.0, std=std_v)
                 
             elif hasattr(module, '_is_attention_output'):
-                # Attention output projection - scale by depth
-                std = self.config['initializer_range'] * depth_scale
+                # Attention output projection - scale by depth and layer
+                parent = module
+                while parent is not None:
+                    if hasattr(parent, '_layer_idx'):
+                        layer_idx = parent._layer_idx
+                        layer_scale = 1.0 - 0.1 * (layer_idx / num_layers)
+                        break
+                    parent = getattr(parent, '_parent', None)
+                    
+                std = self.config['initializer_range'] * depth_scale * layer_scale
                 module.weight.data.normal_(mean=0.0, std=std)
                 
             elif isinstance(module.weight, nn.Parameter) and module.out_features > module.in_features * 2:
-                # Likely FFN up/gate projection - use Xavier uniform
-                nn.init.xavier_uniform_(module.weight, gain=1.0)
+                # Likely FFN up/gate projection - use He initialization for activation layers
+                # He initialization is better for layers with non-linear activations
+                nn.init.kaiming_uniform_(module.weight, mode='fan_in', nonlinearity='relu')
                 
             elif isinstance(module.weight, nn.Parameter) and module.in_features > module.out_features * 2:
-                # Likely FFN down projection - scale by depth
-                std = self.config['initializer_range'] * depth_scale
+                # Likely FFN down projection - scale by depth and layer
+                std = self.config['initializer_range'] * depth_scale * layer_scale
                 module.weight.data.normal_(mean=0.0, std=std)
                 
             else:
@@ -392,16 +438,34 @@ class TransformerLM(nn.Module):
             module.weight.data.fill_(1.0)
             
         elif isinstance(module, SwiGLU):
-            # Special initialization for SwiGLU components
-            # Fused gate+up projection: Xavier uniform
+            # Special initialization for SwiGLU components with layer-dependent scaling
+            layer_scale = 1.0
+            if hasattr(module, '_layer_idx'):
+                layer_idx = module._layer_idx
+                layer_scale = 1.0 - 0.1 * (layer_idx / num_layers)
+            
+            # Fused gate+up projection: differentiated initialization
             if hasattr(module, 'w_fused'):
-                nn.init.xavier_uniform_(module.w_fused.weight, gain=1.0)
+                # The fused weight contains both gate and up projections
+                # Split conceptually for different initialization
+                weight = module.w_fused.weight.data
+                intermediate_size = weight.shape[0] // 2
+                
+                # Gate projection (first half) - smaller variance for stability
+                gate_weight = weight[:intermediate_size, :]
+                gate_std = self.config['initializer_range'] * layer_scale * 0.8
+                gate_weight.normal_(mean=0.0, std=gate_std)
+                
+                # Up projection (second half) - He initialization for activation
+                up_weight = weight[intermediate_size:, :]
+                nn.init.kaiming_uniform_(up_weight, mode='fan_in', nonlinearity='relu')
+                
                 if module.w_fused.bias is not None:
                     module.w_fused.bias.data.zero_()
                     
-            # Down projection: scaled by depth
+            # Down projection: scaled by depth and layer
             if hasattr(module, 'w_down'):
-                std = self.config['initializer_range'] * depth_scale
+                std = self.config['initializer_range'] * depth_scale * layer_scale
                 module.w_down.weight.data.normal_(mean=0.0, std=std)
                 if module.w_down.bias is not None:
                     module.w_down.bias.data.zero_()
@@ -410,7 +474,6 @@ class TransformerLM(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         return_dict: bool = True
     ) -> Union[dict, tuple]:
@@ -419,7 +482,6 @@ class TransformerLM(nn.Module):
         
         Args:
             input_ids: Input token IDs (batch_size, seq_len)
-            attention_mask: Attention mask for padding (batch_size, seq_len)
             labels: Target token IDs for language modeling loss
             return_dict: Whether to return a dictionary
             
@@ -433,9 +495,7 @@ class TransformerLM(nn.Module):
         # Pass through optimized transformer decoder with RoPE and SwiGLU
         # The TransformerDecoder handles causal masking and position encoding internally
         hidden_states = self.transformer(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            is_causal=True  # Always use causal masking for language modeling
+            hidden_states=hidden_states
         )
         
         # Language modeling head
@@ -448,54 +508,11 @@ class TransformerLM(nn.Module):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             
-            # Create mask for positions after the first EOS token
-            eos_token_id = self.config.get('eos_token_id', 2)
-            
-            # Find positions of EOS tokens (before shifting)
-            eos_positions = (labels == eos_token_id).float()
-            
-            # Use cumsum to identify positions after the first EOS
-            # cumsum will be 0 before first EOS, 1 at first EOS, >1 after
-            eos_cumsum = eos_positions.cumsum(dim=1)
-            
-            # For the loss calculation after shifting:
-            # - We want to predict UP TO and INCLUDING the first EOS
-            # - We DON'T want to predict anything AFTER the first EOS
-            
-            # Create base mask: True only before any EOS
-            before_eos_mask = (eos_cumsum == 0)
-            
-            # After shifting for next-token prediction:
-            # Position i in shift space predicts token at position i+1 in original space
-            shift_mask = before_eos_mask[..., :-1].contiguous()
-            
-            # Find the SINGLE position that predicts the first EOS
-            # This is where cumsum transitions from 0 to 1
-            # Check if current position has cumsum==0 AND next position has cumsum==1
-            eos_predictor = (eos_cumsum[..., :-1] == 0) & (eos_cumsum[..., 1:] == 1)
-            
-            # Combine: include positions before EOS AND the position predicting EOS
-            shift_mask = shift_mask | eos_predictor
-            
-            # Replace labels after first EOS with -100 (ignore_index)
-            # This ensures the model learns to predict EOS but not what comes after
-            masked_labels = torch.where(
-                shift_mask,
-                shift_labels,
-                torch.tensor(-100, device=shift_labels.device)
-            )
-            
-            # NOTE: Removed redundant padding mask that was incorrectly masking EOS tokens
-            # Since dataloader provides fixed-length windows with no actual padding,
-            # and pad_token_id == eos_token_id in CodeLlama, the previous padding mask
-            # was preventing the model from learning to generate EOS tokens.
-            # The EOS masking logic above already correctly handles masking after first EOS.
-            
-            # Compute cross-entropy loss with proper masking
+            # Compute cross-entropy loss on the entire batch
+            # No masking - calculate loss on all tokens
             loss = F.cross_entropy(
                 shift_logits.view(-1, self.config['vocab_size']),
-                masked_labels.view(-1),
-                ignore_index=-100
+                shift_labels.view(-1)
             )
         
         if return_dict:
@@ -732,7 +749,6 @@ class TransformerLM(nn.Module):
         # Calculate parameters for a single transformer block
         hidden_size = self.config['hidden_size']
         intermediate_size = self.config['intermediate_size']
-        num_heads = self.config['num_heads']
         
         # Attention module parameters with fully fused QKV projection
         # Single QKV projection: outputs 3 * hidden_size
@@ -848,8 +864,9 @@ def create_model(config_path: str = "config.json", model_size: str = None) -> Tr
     # Get parameter count for logging
     params = model.get_num_params()
     
-    # Always compile for massive speedup (2-3x faster)
-    model = torch.compile(model)
+    # Always compile
+    #model = torch.compile(model)
+    model = torch.compile(model,mode="max-autotune-no-cudagraphs", fullgraph=True, dynamic=False)
     print(f"Model created: {params['total']:,} parameters")
 
     return model

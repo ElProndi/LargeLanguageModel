@@ -44,9 +44,6 @@
       "Bash(code:*)",
       "Bash(jq:*)",
       "Read(//lambda/nfs/Base-test/**)"
-    ],
-    "additionalDirectories": [
-      "/home/andrea/Desktop/data/raw/enwiki_namespace_0"
     ]
   },
   "outputStyle": "default"

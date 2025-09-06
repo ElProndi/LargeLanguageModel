@@ -5,6 +5,7 @@ This module implements SwiGLU
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
 
 class SwiGLU(nn.Module):
@@ -66,12 +67,14 @@ class SwiGLU(nn.Module):
         fused_output = self.w_fused(x)
         gate, up = fused_output.chunk(2, dim=-1)
         
-        # Apply Swish activation to gate
-        # Swish(x) = x * sigmoid(x) = x * (1 / (1 + exp(-x)))
-        gate = gate * torch.sigmoid(gate)
+        # Apply Swish activation to gate using optimized F.silu
+        # F.silu is PyTorch's optimized implementation of x * sigmoid(x)
+        gate = F.silu(gate)
         
         # Element-wise multiplication (gating mechanism)
-        intermediate = gate * up
+        # In-place operation to save memory
+        gate.mul_(up)
+        intermediate = gate
         
         # Apply down projection
         output = self.w_down(intermediate)

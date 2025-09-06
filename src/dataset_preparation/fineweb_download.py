@@ -105,17 +105,7 @@ class FineWebDownloader:
         print(f"Cache directory: {self.cache_dir}")
         print(f"Output directory: {self.output_dir}")
         print(f"Parallel processes: {self.num_proc}")
-        print("=" * 60)
-        
-        if self.config['size_gb'] > 1000:
-            print("\n⚠️  WARNING: This is a very large dataset!")
-            print(f"   Estimated download size: {self.config['size_gb']:.1f} GB")
-            print("   Ensure you have sufficient disk space before proceeding.")
-            response = input("\nContinue with download? (y/n): ")
-            if response.lower() != 'y':
-                print("Download cancelled.")
-                sys.exit(0)
-        
+        print("=" * 60)        
         print("\nDownloading dataset from HuggingFace...")
         print("(This will cache the dataset for future use)")
         
@@ -260,10 +250,10 @@ Examples:
     parser.add_argument("--config", type=str, default="sample-100BT",
                        choices=list(FineWebDownloader.DATASET_CONFIGS.keys()),
                        help="Dataset configuration to download (default: sample-100BT)")
-    parser.add_argument("--num-proc", type=int, default=4,
-                       help="Number of parallel processes (default: 4)")
-    parser.add_argument("--chunk-size", type=int, default=100000,
-                       help="Documents per chunk file (default: 100000)")
+    parser.add_argument("--num-proc", type=int, default=1,
+                       help="Number of parallel processes (default: 1)")
+    parser.add_argument("--chunk-size", type=int, default=1000000,
+                       help="Documents per chunk file (default: 1000000)")
     parser.add_argument("--max-samples", type=int, default=None,
                        help="Maximum samples to download (default: all)")
     parser.add_argument("--single-file", action="store_true",
@@ -306,9 +296,7 @@ Examples:
             single_file=args.single_file
         )
         
-        print("\n" + "=" * 60)
         print("✓ Download and save complete!")
-        print("=" * 60)
         print(f"Configuration: {args.config}")
         print(f"Total samples: {metadata['total_samples']:,}")
         print(f"Total size: {metadata['total_bytes'] / 1e9:.2f} GB")

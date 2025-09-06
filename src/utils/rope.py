@@ -55,7 +55,8 @@ def apply_rotary_pos_emb(
     k: torch.Tensor,
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor,
-    position_ids: Optional[torch.Tensor] = None
+    position_ids: Optional[torch.Tensor] = None,
+    cached_freqs: Optional[dict] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary position embeddings using real-valued operations.
@@ -70,55 +71,63 @@ def apply_rotary_pos_emb(
         freqs_cos: Cosine frequencies from precompute_freqs
         freqs_sin: Sine frequencies from precompute_freqs
         position_ids: Optional custom position IDs
+        cached_freqs: Optional dict of pre-cached frequencies by dtype
         
     Returns:
         Tuple of rotated (q, k) tensors with same shapes as input
     """
     # q and k have the same shape: (batch, num_heads, seq_len, head_dim)
-    batch_size, num_heads, seq_len, head_dim = q.shape
+    seq_len = q.shape[2]
     
-    # Get frequencies for the current sequence length
-    if position_ids is not None:
-        freqs_cos = freqs_cos[position_ids]
-        freqs_sin = freqs_sin[position_ids]
+    # Check if we have cached frequencies for this dtype
+    if cached_freqs and q.dtype in cached_freqs:
+        # Use pre-cached frequencies (already in broadcast shape: 1, 1, max_seq_len, dim//2)
+        cached_cos, cached_sin = cached_freqs[q.dtype]
+        # Get frequencies for the current sequence length
+        if position_ids is not None:
+            # Index into the sequence dimension (dim 2) of pre-broadcasted tensor
+            freqs_cos = cached_cos[:, :, position_ids, :]
+            freqs_sin = cached_sin[:, :, position_ids, :]
+        else:
+            # Slice the sequence dimension to current seq_len
+            freqs_cos = cached_cos[:, :, :seq_len, :]
+            freqs_sin = cached_sin[:, :, :seq_len, :]
+        # No need for reshaping - already in correct broadcast shape
     else:
-        freqs_cos = freqs_cos[:seq_len]
-        freqs_sin = freqs_sin[:seq_len]
+        # Fall back to original behavior for uncached dtypes
+        # Get frequencies for the current sequence length
+        if position_ids is not None:
+            freqs_cos = freqs_cos[position_ids]
+            freqs_sin = freqs_sin[position_ids]
+        else:
+            freqs_cos = freqs_cos[:seq_len]
+            freqs_sin = freqs_sin[:seq_len]
+        
+        # Reshape frequencies for broadcasting using expand (more efficient than unsqueeze)
+        # From (seq_len, dim//2) to (1, 1, seq_len, dim//2)
+        freqs_cos = freqs_cos[None, None, :, :]  # More efficient than unsqueeze().unsqueeze()
+        freqs_sin = freqs_sin[None, None, :, :]
+        
+        # Cast frequencies to match input dtype
+        freqs_cos = freqs_cos.to(q.dtype)
+        freqs_sin = freqs_sin.to(q.dtype)
     
-    # Reshape frequencies for broadcasting
-    # From (seq_len, dim//2) to (1, 1, seq_len, dim//2)
-    freqs_cos = freqs_cos.unsqueeze(0).unsqueeze(0)
-    freqs_sin = freqs_sin.unsqueeze(0).unsqueeze(0)
+    # Pre-allocate output tensors to avoid stack operations
+    q_rot = torch.empty_like(q)
+    k_rot = torch.empty_like(k)
     
-    # Cast frequencies to match input dtype for proper computation
-    freqs_cos = freqs_cos.to(q.dtype)
-    freqs_sin = freqs_sin.to(q.dtype)
-    
-    # Reshape q and k to separate pairs
-    # From (..., head_dim) to (..., head_dim//2, 2)
-    q_reshape = q.reshape(batch_size, num_heads, seq_len, head_dim // 2, 2)
-    k_reshape = k.reshape(batch_size, num_heads, seq_len, head_dim // 2, 2)
-    
-    # Extract pairs
-    q_r = q_reshape[..., 0]  # Real parts (even indices)
-    q_i = q_reshape[..., 1]  # Imaginary parts (odd indices)
-    k_r = k_reshape[..., 0]
-    k_i = k_reshape[..., 1]
-    
-    # Apply rotation using real arithmetic
+    # Apply rotation using direct slicing (more memory efficient)
+    # This avoids reshape/stack operations and reduces memory allocations
     # Rotation formula: (r + i*i) * (cos + i*sin) = (r*cos - i*sin) + i*(r*sin + i*cos)
-    q_rot_r = q_r * freqs_cos - q_i * freqs_sin
-    q_rot_i = q_r * freqs_sin + q_i * freqs_cos
-    k_rot_r = k_r * freqs_cos - k_i * freqs_sin
-    k_rot_i = k_r * freqs_sin + k_i * freqs_cos
     
-    # Stack and reshape back
-    q_rot = torch.stack([q_rot_r, q_rot_i], dim=-1)
-    k_rot = torch.stack([k_rot_r, k_rot_i], dim=-1)
+    # Process even indices (real parts)
+    q_rot[..., 0::2] = q[..., 0::2] * freqs_cos - q[..., 1::2] * freqs_sin
+    # Process odd indices (imaginary parts)  
+    q_rot[..., 1::2] = q[..., 0::2] * freqs_sin + q[..., 1::2] * freqs_cos
     
-    # Flatten last two dimensions to get back original shape
-    q_rot = q_rot.reshape(batch_size, num_heads, seq_len, head_dim)
-    k_rot = k_rot.reshape(batch_size, num_heads, seq_len, head_dim)
+    # Same for keys
+    k_rot[..., 0::2] = k[..., 0::2] * freqs_cos - k[..., 1::2] * freqs_sin
+    k_rot[..., 1::2] = k[..., 0::2] * freqs_sin + k[..., 1::2] * freqs_cos
     
     return q_rot, k_rot
 
@@ -165,6 +174,25 @@ class RotaryEmbedding(nn.Module):
         )
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+        
+        # Pre-cache frequencies in common dtypes to avoid repeated casting
+        # This trades ~3x memory for eliminating dtype conversion overhead
+        # Pre-compute with broadcast dimensions to eliminate runtime reshaping
+        self.cached_freqs = {}
+        common_dtypes = [torch.float32, torch.float16, torch.bfloat16]
+        
+        for dtype in common_dtypes:
+            # Only cache if dtype is supported on current device
+            try:
+                # Pre-broadcast to (1, 1, max_position_embeddings, dim//2)
+                # This eliminates the need for unsqueeze operations during forward pass
+                self.cached_freqs[dtype] = (
+                    freqs_cos.to(dtype).unsqueeze(0).unsqueeze(0),
+                    freqs_sin.to(dtype).unsqueeze(0).unsqueeze(0)
+                )
+            except (RuntimeError, TypeError):
+                # Skip unsupported dtypes (e.g., bf16 on CPU)
+                pass
     
     def forward(
         self,
@@ -195,4 +223,7 @@ class RotaryEmbedding(nn.Module):
                 dtype=torch.long
             )
         
-        return apply_rotary_pos_emb(q, k, self.freqs_cos, self.freqs_sin, position_ids)
+        return apply_rotary_pos_emb(
+            q, k, self.freqs_cos, self.freqs_sin, position_ids, 
+            cached_freqs=self.cached_freqs
+        )

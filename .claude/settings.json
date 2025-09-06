@@ -1,12 +1,5 @@
 {
   "permissions": {
     "additionalDirectories": ["../"]
-  },
-  "projectContext": {
-    "description": "Small Custom Language Model implementation with complete refactor in progress",
-    "dataPaths": {
-      "raw": "/home/andrea/Desktop/data/raw/",
-      "processed": "/home/andrea/Desktop/data/processed/"
-    }
   }
 }
