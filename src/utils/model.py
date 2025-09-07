@@ -35,7 +35,7 @@ class MultiHeadAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         dropout: float = 0.0,
-        max_position_embeddings: int = 2048,
+        max_position_embeddings: int = 1024,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0
     ):
@@ -123,7 +123,7 @@ class TransformerLayer(nn.Module):
         dropout: float = 0.1,
         attention_dropout: float = 0.1,
         layer_norm_eps: float = 1e-5,
-        max_position_embeddings: int = 2048,
+        max_position_embeddings: int = 1024,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
         layer_idx: int = 0,
@@ -247,7 +247,7 @@ class TransformerDecoder(nn.Module):
         dropout: float = 0.1,
         attention_dropout: float = 0.1,
         layer_norm_eps: float = 1e-5,
-        max_position_embeddings: int = 2048,
+        max_position_embeddings: int = 1024,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0
     ):
@@ -302,7 +302,7 @@ class TransformerLM(nn.Module):
         num_layers: int = 6,
         num_heads: int = 6,
         intermediate_size: Optional[int] = None,  # Allow explicit intermediate size
-        max_position_embeddings: int = 2048,
+        max_position_embeddings: int = 1024,
         rope_theta: float = 10000.0,
         rope_scaling: float = 1.0,
         dropout: float = 0.1,

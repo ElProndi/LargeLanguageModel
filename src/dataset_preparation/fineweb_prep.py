@@ -22,7 +22,7 @@ import gc  # For explicit garbage collection
 class FineWebProcessor:
     """Processes pre-downloaded FineWeb JSONL files into tokenized sequences."""
     
-    def __init__(self, window_size: int = 2048):
+    def __init__(self, window_size: int = 1024):
         """Initialize processor with window size."""
         self.window_size = window_size
         self.tokenizer = None
@@ -566,8 +566,8 @@ def main():
                        help="Input directory containing JSONL files (default: data/raw/fineweb)")
     parser.add_argument("--output", type=str, default=None,
                        help="Output directory for tokenized files (default: auto-generated based on mode)")
-    parser.add_argument("--window", type=int, default=2048,
-                       help="Context window size in tokens (default: 2048)")
+    parser.add_argument("--window", type=int, default=1024,
+                       help="Context window size in tokens (default: 1024)")
     parser.add_argument("--batch-size", type=int, default=200000,
                        help="Number of documents per output file (default: 700000, exactly 7 chunks)")
     

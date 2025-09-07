@@ -17,11 +17,11 @@ from .tokenizer import CodeLlamaTokenizer
 class LIMATokenizer:
     """Tokenizer for LIMA instruction dataset."""
     
-    def __init__(self, max_length: int = 2048):
+    def __init__(self, max_length: int = 1024):
         """Initialize LIMA tokenizer.
         
         Args:
-            max_length: Maximum sequence length in tokens (default 2048)
+            max_length: Maximum sequence length in tokens (default 1024)
         """
         self.max_length = max_length
         self.tokenizer = None
@@ -277,7 +277,7 @@ def main():
     parser.add_argument("--output", type=str,
                        default="data/post-training",
                        help="Output directory for tokenized data")
-    parser.add_argument("--max-length", type=int, default=2048,
+    parser.add_argument("--max-length", type=int, default=1024,
                        help="Maximum sequence length in tokens")
     parser.add_argument("--batch-size", type=int, default=100,
                        help="Batch size for processing")

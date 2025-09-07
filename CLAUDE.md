@@ -54,7 +54,7 @@ data/                           # (within project root)
 **Defaults**: 2 workers, 100k docs/chunk → `data/raw/fineweb/`
 
 #### 2b. Processing (src/dataset_preparation/fineweb_prep.py)  
-**Features**: Continuous packing (no gaps), BOS/EOS preservation, 2048-token windows  
+**Features**: Continuous packing (no gaps), BOS/EOS preservation, 1024-token windows  
 **Batching**: 700k docs/file (7 chunks) → `data/tokenized_datasets/`
 
 ### 3. DataLoader (src/training/dataloader.py)
@@ -101,7 +101,7 @@ data/                           # (within project root)
 ### 9. Post-Training
 
 #### LIMA Preparation (src/dataset_preparation/lima_tokenizer.py)
-**Dataset**: 1,030 curated examples (97% single-turn), 542 kept (<2048 tokens)  
+**Dataset**: 1,030 curated examples (97% single-turn), 542 kept (<1024 tokens)  
 **Format**: `<s>User: {q}\nAssistant: {a}</s>` → `data/post-training/`
 
 #### Fine-Tuning (src/training/post_training.py)
@@ -158,7 +158,7 @@ ls benchmark_results/*.txt
 ### Key Parameters
 - Model: hidden_size, num_layers, num_heads, vocab_size=32016
 - Training: batch_size, learning_rate, warmup_steps, grad_accumulation
-- Data: window_size=2048, val_split=0.1
+- Data: window_size=1024, val_split=0.1
 
 ## Development Standards
 

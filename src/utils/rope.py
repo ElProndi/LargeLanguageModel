@@ -15,7 +15,7 @@ from typing import Tuple, Optional
 
 def precompute_freqs(
     dim: int,
-    max_position_embeddings: int = 2048,
+    max_position_embeddings: int = 1024,
     theta: float = 10000.0,
     device: Optional[torch.device] = None,
     scaling_factor: float = 1.0
@@ -142,7 +142,7 @@ class RotaryEmbedding(nn.Module):
     def __init__(
         self,
         dim: int,
-        max_position_embeddings: int = 2048,
+        max_position_embeddings: int = 1024,
         theta: float = 10000.0,
         scaling_factor: float = 1.0,
         device: Optional[torch.device] = None

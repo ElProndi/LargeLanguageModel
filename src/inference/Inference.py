@@ -1347,7 +1347,7 @@ def run_generation_loop(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTok
             continue
         
         # Get generation parameters
-        defaults = {'max_length': 2048 if is_multi else 200, 'temperature': 1, 'top_k': 50, 'top_p': 0.95}
+        defaults = {'max_length': 1024 if is_multi else 200, 'temperature': 1, 'top_k': 50, 'top_p': 0.95}
         generation_params, use_streaming = get_generation_params_interactive(defaults)
         
         print(f"\n{Colors.BOLD}Generating...{Colors.ENDC}")
@@ -1728,7 +1728,7 @@ def run_chat_mode(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer
     
     # Get generation parameters once for the session
     print(f"\n{Colors.BOLD}Configure Chat Generation Parameters:{Colors.ENDC}")
-    defaults = {'max_length': 2048, 'temperature': 0.8, 'top_k': 40, 'top_p': 0.9}
+    defaults = {'max_length': 1024, 'temperature': 0.8, 'top_k': 40, 'top_p': 0.9}
     generation_params, use_streaming = get_generation_params_interactive(defaults)
     
     while True:

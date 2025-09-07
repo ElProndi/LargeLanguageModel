@@ -188,7 +188,7 @@ class PerplexityBenchmark:
         sequences: np.ndarray,
         batch_size: int = 32,
         stride: Optional[int] = None,
-        max_length: int = 2048
+        max_length: int = 1024
     ) -> Dict[str, float]:
         """Calculate perplexity on the given sequences.
         
