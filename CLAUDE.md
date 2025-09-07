@@ -15,6 +15,7 @@ LargeLanguageModel/
 │   │   ├── tokenizer.py           # LLaMA-2 tokenizer wrapper
 │   │   ├── fineweb_download.py    # Parallel FineWeb downloader
 │   │   ├── fineweb_prep.py        # JSONL→tokenized sequences
+│   │   ├── fineweb_recovery.py    # Recovery for missing parquet files
 │   │   └── lima_tokenizer.py      # LIMA dataset prep
 │   ├── training/
 │   │   ├── pre_training.py        # Pre-training loop
@@ -22,7 +23,9 @@ LargeLanguageModel/
 │   │   └── dataloader.py          # PyTorch DataLoader
 │   ├── inference/
 │   │   ├── Inference.py           # Text generation interface
-│   │   └── benchmark.py           # LAMBADA evaluation
+│   │   ├── benchmark.py           # LAMBADA evaluation
+│   │   ├── hellaswag_benchmark.py # HellaSwag commonsense reasoning
+│   │   └── perplexity_benchmark.py # Perplexity on held-out data
 │   └── utils/
 │       ├── model.py               # Transformer architecture
 │       ├── logging_utils.py       # Dual logging system
@@ -53,7 +56,12 @@ data/                           # (within project root)
 **Scale**: Test=2 chunks/200k docs | Full=100B tokens/148M docs/277GB  
 **Defaults**: 2 workers, 100k docs/chunk → `data/raw/fineweb/`
 
-#### 2b. Processing (src/dataset_preparation/fineweb_prep.py)  
+#### 2b. Recovery (src/dataset_preparation/fineweb_recovery.py)
+**Purpose**: Download missing parquet files directly from HuggingFace  
+**Features**: Preserves existing 274GB downloads, checks for missing files  
+**Process**: Verify missing → Download directly → Validate completeness
+
+#### 2c. Processing (src/dataset_preparation/fineweb_prep.py)  
 **Features**: Continuous packing (no gaps), BOS/EOS preservation, 1024-token windows  
 **Batching**: 700k docs/file (7 chunks) → `data/tokenized_datasets/`
 
@@ -93,20 +101,24 @@ data/                           # (within project root)
 **Features**: Hierarchical checkpoint selection, Unicode support, ANSI colors  
 **Parameters**: temp=0.8, top_k=50, top_p=0.95, max_length=200
 
-### 8. Benchmark (src/inference/benchmark.py)
-**LAMBADA**: Context-dependent word prediction, strict accuracy  
+### 8. Benchmark Suite
+
+#### LAMBADA (src/inference/benchmark.py)
+**Task**: Context-dependent word prediction, strict accuracy  
 **Configs**: Quick=50 | Standard=100 | Comprehensive=200 samples  
 **Output**: `benchmark_results/` with JSON+text summaries
 
-### 9. Post-Training
+#### HellaSwag (src/inference/hellaswag_benchmark.py)
+**Task**: Commonsense reasoning - predicting plausible scenario continuations  
+**Dataset**: Downloaded from HuggingFace, cached in `benchmark_cache/`  
+**Metrics**: Accuracy on 4-way multiple choice (human ~95%, random 25%)  
+**Features**: Sequence scoring via log-probability, batch evaluation
 
-#### LIMA Preparation (src/dataset_preparation/lima_tokenizer.py)
-**Dataset**: 1,030 curated examples (97% single-turn), 542 kept (<1024 tokens)  
-**Format**: `<s>User: {q}\nAssistant: {a}</s>` → `data/post-training/`
-
-#### Fine-Tuning (src/training/post_training.py)
-**Training**: LR=5e-5, batch=8, ~60 steps/epoch, GPU-resident  
-**Output**: `checkpoints/sft_lima_*/` with best/latest/epoch checkpoints
+#### Perplexity (src/inference/perplexity_benchmark.py)
+**Task**: Evaluate model quality on held-out FineWeb data (`tokens_0.npy`)  
+**Metrics**: Perplexity (lower is better), median/std statistics  
+**Features**: Sliding window for long sequences, memory-mapped data loading  
+**Interpretation**: <20 excellent, 20-50 good, 50-100 moderate, >100 poor
 
 ## Usage Commands
 
@@ -116,10 +128,13 @@ data/                           # (within project root)
 |------|-----------|-----------|----------------|
 | **Tokenizer** | `python3 -m src.dataset_preparation.tokenizer` | - | `--encode "text"` `--decode "1,2,3"` |
 | **Download** | `python3 -m src.dataset_preparation.fineweb_download --test` | `python3 -m src.dataset_preparation.fineweb_download` | `--workers N --chunk-size M` |
+| **Recovery** | `python3 -m src.dataset_preparation.fineweb_recovery` | - | Automatic detection of missing files |
 | **Process** | `python3 -m src.dataset_preparation.fineweb_prep --test` | `python3 -m src.dataset_preparation.fineweb_prep` | `--window W --batch-size B` |
 | **Pre-Train** | `python3 -m src.training.pre_training --test` | `python3 -m src.training.pre_training` | `--resume checkpoint.pt --name exp` |
 | **Inference** | `python3 -m src.inference.Inference` → Select mode | - | Interactive prompts |
-| **Benchmark** | Via `python3 -m src.inference.Inference` option 3 | - | quick/standard/comprehensive |
+| **LAMBADA** | Via `python3 -m src.inference.Inference` option 3 | - | quick/standard/comprehensive |
+| **HellaSwag** | `python3 -m src.inference.hellaswag_benchmark --checkpoint path` | - | `--max-samples N --split val` |
+| **Perplexity** | `python3 -m src.inference.perplexity_benchmark --checkpoint path` | - | `--max-sequences N --batch-size B` |
 | **LIMA Prep** | `python3 -m src.dataset_preparation.lima_tokenizer` | - | `--max-length L --batch-size B` |
 | **SFT** | `python3 -m src.training.post_training --checkpoint path` | - | `--epochs E --lr R --batch-size B` |
 

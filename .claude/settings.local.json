@@ -43,7 +43,10 @@
       "WebFetch(domain:marketplace.visualstudio.com)",
       "Bash(code:*)",
       "Bash(jq:*)",
-      "Read(//lambda/nfs/Base-test/**)"
+      "Read(//lambda/nfs/Base-test/**)",
+      "Read(//home/andrea/.cache/huggingface/datasets/HuggingFaceFW___fineweb/**)",
+      "Read(//home/andrea/.cache/huggingface/**)",
+      "Read(//tmp/**)"
     ]
   },
   "outputStyle": "default"

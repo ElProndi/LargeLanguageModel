@@ -176,9 +176,14 @@ class FineWebDownloader:
             print(f"Creating {num_chunks} chunk files...")
             
             with tqdm(total=num_chunks, desc="Saving chunks") as pbar:
-                for i in range(0, total_samples, chunk_size):
-                    chunk_end = min(i + chunk_size, total_samples)
-                    chunk_data = dataset.select(range(i, chunk_end))
+                for shard_idx in range(num_chunks):
+                    # Use shard method for more efficient dataset splitting
+                    chunk_data = dataset.shard(
+                        num_shards=num_chunks,
+                        index=shard_idx,
+                        contiguous=True,
+                        keep_in_memory=False
+                    )
                     
                     # Save chunk
                     chunk_filename = f"fineweb_chunk_{file_count:05d}.jsonl"
@@ -250,8 +255,8 @@ Examples:
     parser.add_argument("--config", type=str, default="sample-100BT",
                        choices=list(FineWebDownloader.DATASET_CONFIGS.keys()),
                        help="Dataset configuration to download (default: sample-100BT)")
-    parser.add_argument("--num-proc", type=int, default=1,
-                       help="Number of parallel processes (default: 1)")
+    parser.add_argument("--num-proc", type=int, default=4,
+                       help="Number of parallel processes (default: 4)")
     parser.add_argument("--chunk-size", type=int, default=1000000,
                        help="Documents per chunk file (default: 1000000)")
     parser.add_argument("--max-samples", type=int, default=None,
