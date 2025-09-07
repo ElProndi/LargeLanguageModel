@@ -14,7 +14,7 @@ from itertools import chain
 import numpy as np
 import json
 from tqdm import tqdm
-from .tokenizer import CodeLlamaTokenizer
+from .tokenizer import LLaMA2Tokenizer
 from collections import deque
 import gc  # For explicit garbage collection
 
@@ -41,18 +41,18 @@ class FineWebProcessor:
         self.expected_batch_size: Optional[int] = None
     
     def load_tokenizer(self):
-        """Load the CodeLlama tokenizer."""
-        tokenizer_path = Path("tokenizers/codellama_tokenizer")
+        """Load the LLaMA-2 tokenizer."""
+        tokenizer_path = Path("tokenizers/llama2_tokenizer")
         
         print(f"Loading tokenizer...")
-        self.tokenizer = CodeLlamaTokenizer()
+        self.tokenizer = LLaMA2Tokenizer()
         
         # Try to load saved tokenizer first, otherwise download
         if tokenizer_path.exists():
             print(f"  Loading from {tokenizer_path}")
             self.tokenizer.load(str(tokenizer_path))
         else:
-            print(f"  Downloading CodeLlama tokenizer from HuggingFace...")
+            print(f"  Downloading LLaMA-2 tokenizer from HuggingFace...")
             self.tokenizer.train()  # Downloads the pre-trained tokenizer
             self.tokenizer.save(str(tokenizer_path))
         

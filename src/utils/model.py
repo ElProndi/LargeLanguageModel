@@ -309,7 +309,7 @@ class TransformerLM(nn.Module):
         attention_dropout: float = 0.1,
         layer_norm_eps: float = 1e-5,
         initializer_range: float = 0.02,
-        pad_token_id: int = 2,  # Same as EOS token (CodeLlama convention)
+        pad_token_id: int = 2,  # Same as EOS token (LLaMA-2 convention)
         eos_token_id: int = 2,
         tie_embeddings: bool = True
     ):

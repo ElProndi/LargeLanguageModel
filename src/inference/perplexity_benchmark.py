@@ -27,24 +27,24 @@ from tqdm import tqdm
 # Import model utilities
 try:
     # Try relative imports (when imported as a module)
-    from ..dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from ..dataset_preparation.tokenizer import LLaMA2Tokenizer
     from ..utils.model import TransformerLM
 except ImportError:
     # Fall back to absolute imports (when run directly)
-    from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from src.dataset_preparation.tokenizer import LLaMA2Tokenizer
     from src.utils.model import TransformerLM
 
 
-def _load_tokenizer() -> CodeLlamaTokenizer:
-    """Load or download the CodeLlama tokenizer."""
+def _load_tokenizer() -> LLaMA2Tokenizer:
+    """Load or download the LLaMA-2 tokenizer."""
     print("Loading tokenizer...")
-    tokenizer = CodeLlamaTokenizer()
-    tokenizer_path = Path("tokenizers/codellama_tokenizer")
+    tokenizer = LLaMA2Tokenizer()
+    tokenizer_path = Path("tokenizers/llama2_tokenizer")
     
     if tokenizer_path.exists():
         try:
             tokenizer.load(str(tokenizer_path))
-            print(f"CodeLlama tokenizer loaded from {tokenizer_path}")
+            print(f"LLaMA-2 tokenizer loaded from {tokenizer_path}")
         except Exception as e:
             print(f"Failed to load tokenizer from {tokenizer_path}: {e}")
             raise
@@ -57,7 +57,7 @@ def _load_tokenizer() -> CodeLlamaTokenizer:
     return tokenizer
 
 
-def load_model_from_checkpoint(checkpoint_path: Union[str, Path], device: torch.device) -> Tuple[TransformerLM, CodeLlamaTokenizer]:
+def load_model_from_checkpoint(checkpoint_path: Union[str, Path], device: torch.device) -> Tuple[TransformerLM, LLaMA2Tokenizer]:
     """Load model from checkpoint with proper architecture handling."""
     checkpoint_path = Path(checkpoint_path)
     

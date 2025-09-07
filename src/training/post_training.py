@@ -24,14 +24,14 @@ from torch.utils.data import DataLoader, TensorDataset
 try:
     # Try relative imports (when imported as a module)
     from ..utils.model import create_model, TransformerLM
-    from ..dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from ..dataset_preparation.tokenizer import LLaMA2Tokenizer
     from ..utils.logging_utils import DualLogger
     from ..utils.scheduler import get_cosine_schedule_with_warmup
     from ..utils.metrics import MetricsTracker
 except ImportError:
     # Fall back to absolute imports (when run directly)
     from src.utils.model import create_model, TransformerLM
-    from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from src.dataset_preparation.tokenizer import LLaMA2Tokenizer
     from src.utils.logging_utils import DualLogger
     from src.utils.scheduler import get_cosine_schedule_with_warmup
     from src.utils.metrics import MetricsTracker
@@ -110,7 +110,7 @@ class SFTTrainer:
         
         # Load tokenizer
         print("\nLoading tokenizer...")
-        self.tokenizer = CodeLlamaTokenizer()
+        self.tokenizer = LLaMA2Tokenizer()
         tokenizer_path = self.pretrained_config['paths']['tokenizer_dir']
         self.tokenizer.load(tokenizer_path)
         print(f"Tokenizer loaded: vocab_size={self.tokenizer.vocab_size}")

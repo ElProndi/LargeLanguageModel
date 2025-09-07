@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CodeLlama tokenizer wrapper for the LLM training pipeline."""
+"""LLaMA-2 tokenizer wrapper for the LLM training pipeline."""
 
 import sys
 import argparse
@@ -16,30 +16,30 @@ except ImportError:
     sys.exit(1)
 
 
-class CodeLlamaTokenizer:
-    """Wrapper for CodeLlama tokenizer from HuggingFace."""
+class LLaMA2Tokenizer:
+    """Wrapper for LLaMA-2 tokenizer from HuggingFace."""
     
-    def __init__(self, model_name: str = "codellama/CodeLlama-7b-hf"):
-        """Initialize with CodeLlama tokenizer.
+    def __init__(self, model_name: str = "NousResearch/Llama-2-7b-hf"):
+        """Initialize with LLaMA-2 tokenizer.
         
         Args:
-            model_name: HuggingFace model name for CodeLlama tokenizer
+            model_name: HuggingFace model name for LLaMA-2 tokenizer
         """
         self.model_name = model_name
         self.tokenizer = None
         self.vocab_size = None
         
     def train(self, test_mode: bool = False):
-        """Load pre-trained CodeLlama tokenizer.
+        """Load pre-trained LLaMA-2 tokenizer.
         
         Note: This doesn't actually train a tokenizer, it loads the pre-trained one.
         We keep this method for compatibility with the existing pipeline.
         
         Args:
-            test_mode: Ignored - we always use the full CodeLlama tokenizer
+            test_mode: Ignored - we always use the full LLaMA-2 tokenizer
         """
         print(f"\n{'='*60}")
-        print(f"Loading CodeLlama Tokenizer")
+        print(f"Loading LLaMA-2 Tokenizer")
         print(f"Model: {self.model_name}")
         print(f"{'='*60}")
         
@@ -75,7 +75,7 @@ class CodeLlamaTokenizer:
             raise
     
     def encode(self, text: Union[str, List[str]], add_special_tokens: bool = True) -> Union[List[int], List[List[int]]]:
-        """Encode text to token IDs using CodeLlama tokenizer.
+        """Encode text to token IDs using LLaMA-2 tokenizer.
         
         Args:
             text: Single string or list of strings to encode
@@ -112,7 +112,7 @@ class CodeLlamaTokenizer:
             return encoding
     
     def decode(self, ids: Union[List[int], List[List[int]]], skip_special_tokens: bool = True) -> Union[str, List[str]]:
-        """Decode token IDs to text using CodeLlama tokenizer.
+        """Decode token IDs to text using LLaMA-2 tokenizer.
         
         Args:
             ids: Token IDs as list of ints (single) or list of lists (batch)
@@ -192,7 +192,7 @@ class CodeLlamaTokenizer:
             if metadata_file.exists():
                 with open(metadata_file, 'rb') as f:
                     metadata = orjson.loads(f.read())
-                    self.model_name = metadata.get("model_name", "codellama/CodeLlama-7b-hf")
+                    self.model_name = metadata.get("model_name", "meta-llama/Llama-2-7b-hf")
             
             print(f"Tokenizer loaded from {load_path}")
             print(f"Vocabulary size: {self.vocab_size}")
@@ -228,14 +228,14 @@ class CodeLlamaTokenizer:
 
 def main():
     """Main entry point for tokenizer usage."""
-    parser = argparse.ArgumentParser(description="CodeLlama Tokenizer for LLM Pipeline")
+    parser = argparse.ArgumentParser(description="LLaMA-2 Tokenizer for LLM Pipeline")
     parser.add_argument("--test", action="store_true", 
                        help="Test mode (ignored - always uses full tokenizer)")
     parser.add_argument("--encode", type=str, 
                        help="Encode text using tokenizer")
     parser.add_argument("--decode", type=str, 
                        help="Decode token IDs (comma-separated)")
-    parser.add_argument("--save", type=str, default="tokenizers/codellama_tokenizer",
+    parser.add_argument("--save", type=str, default="tokenizers/llama2_tokenizer",
                        help="Save tokenizer to directory")
     parser.add_argument("--load", type=str, 
                        help="Load tokenizer from directory")
@@ -243,10 +243,10 @@ def main():
     args = parser.parse_args()
     
     # Create tokenizer instance
-    tokenizer = CodeLlamaTokenizer()
+    tokenizer = LLaMA2Tokenizer()
     
     # Default save path
-    default_path = "tokenizers/codellama_tokenizer"
+    default_path = "tokenizers/llama2_tokenizer"
     
     # Load existing or download new
     if args.load:
@@ -257,7 +257,7 @@ def main():
             tokenizer.load(default_path)
         except FileNotFoundError:
             print(f"No saved tokenizer found at {default_path}")
-            print("Downloading CodeLlama tokenizer from HuggingFace...")
+            print("Downloading LLaMA-2 tokenizer from HuggingFace...")
             tokenizer.train()
             tokenizer.save(default_path)
     else:

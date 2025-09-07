@@ -1,6 +1,6 @@
 # CLAUDE.md - LLM Training Pipeline
 
-Transformer-based language model training pipeline using CodeLlama tokenizer and FineWeb dataset (277.4GB, 100B tokens from HuggingFace).
+Transformer-based language model training pipeline using LLaMA-2 tokenizer and FineWeb dataset (277.4GB, 100B tokens from HuggingFace).
 
 ## Path Definitions
 - `$DATA`: `./data` (within project root)
@@ -12,7 +12,7 @@ Transformer-based language model training pipeline using CodeLlama tokenizer and
 LargeLanguageModel/
 ├── src/
 │   ├── dataset_preparation/
-│   │   ├── tokenizer.py           # CodeLlama tokenizer wrapper
+│   │   ├── tokenizer.py           # LLaMA-2 tokenizer wrapper
 │   │   ├── fineweb_download.py    # Parallel FineWeb downloader
 │   │   ├── fineweb_prep.py        # JSONL→tokenized sequences
 │   │   └── lima_tokenizer.py      # LIMA dataset prep
@@ -30,7 +30,7 @@ LargeLanguageModel/
 │       ├── scheduler.py           # LR scheduling
 │       ├── rope.py                # Rotary embeddings
 │       └── activations.py         # Activation functions
-├── tokenizers/codellama_tokenizer/  # 32016 vocab
+├── tokenizers/llama2_tokenizer/  # 32000 vocab
 ├── checkpoints/                # Hierarchical: run_*/checkpoint_*.pt, sft_lima_*/
 └── logs/                       # tensorboard/, raw_metrics/
 
@@ -43,7 +43,7 @@ data/                           # (within project root)
 ## Pipeline Components
 
 ### 1. Tokenizer (src/dataset_preparation/tokenizer.py)
-**CodeLlama-7b-hf**: 32,016 vocab, special tokens: `<s>`(1), `</s>`(2), `<unk>`(0)  
+**LLaMA-2-7b-hf**: 32,000 vocab, special tokens: `<s>`(1), `</s>`(2), `<unk>`(0)  
 **Features**: Unicode support, batch encoding, Rust backend
 
 ### 2. FineWeb Pipeline
@@ -156,7 +156,7 @@ ls benchmark_results/*.txt
 `config.json`: Centralized configuration for all components
 
 ### Key Parameters
-- Model: hidden_size, num_layers, num_heads, vocab_size=32016
+- Model: hidden_size, num_layers, num_heads, vocab_size=32000
 - Training: batch_size, learning_rate, warmup_steps, grad_accumulation
 - Data: window_size=1024, val_split=0.1
 

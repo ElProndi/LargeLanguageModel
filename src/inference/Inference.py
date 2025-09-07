@@ -19,12 +19,12 @@ import torch
 try:
     # Try relative imports (when imported as a module)
     from ..utils.model import TransformerLM
-    from ..dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from ..dataset_preparation.tokenizer import LLaMA2Tokenizer
     from .benchmark import ModelBenchmark, format_benchmark_results, save_benchmark_results
 except ImportError:
     # Fall back to absolute imports (when run directly)
     from src.utils.model import TransformerLM
-    from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from src.dataset_preparation.tokenizer import LLaMA2Tokenizer
     from src.inference.benchmark import ModelBenchmark, format_benchmark_results, save_benchmark_results
 
 
@@ -459,33 +459,33 @@ def load_models_for_inference(base_checkpoint_dir: Path, device: torch.device, m
             return None
 
 
-def _load_tokenizer() -> CodeLlamaTokenizer:
-    """Load or download the CodeLlama tokenizer.
+def _load_tokenizer() -> LLaMA2Tokenizer:
+    """Load or download the LLaMA-2 tokenizer.
     
     Returns:
-        Loaded CodeLlamaTokenizer instance
+        Loaded LLaMA2Tokenizer instance
     """
     print_message("Loading tokenizer...", "info")
-    tokenizer = CodeLlamaTokenizer()
-    tokenizer_path = Path("tokenizers/codellama_tokenizer")
+    tokenizer = LLaMA2Tokenizer()
+    tokenizer_path = Path("tokenizers/llama2_tokenizer")
     
     if tokenizer_path.exists():
         try:
             tokenizer.load(str(tokenizer_path))
-            print_message(f"CodeLlama tokenizer loaded from {tokenizer_path}", "success")
+            print_message(f"LLaMA-2 tokenizer loaded from {tokenizer_path}", "success")
         except Exception as e:
             print_message(f"Failed to load tokenizer from {tokenizer_path}: {e}", "error")
             sys.exit(1)
     else:
-        print_message("CodeLlama tokenizer not found locally. Downloading from HuggingFace...", "info")
+        print_message("LLaMA-2 tokenizer not found locally. Downloading from HuggingFace...", "info")
         tokenizer.train()  # Downloads the pre-trained tokenizer
         tokenizer.save(str(tokenizer_path))
-        print_message(f"CodeLlama tokenizer downloaded and saved to {tokenizer_path}", "success")
+        print_message(f"LLaMA-2 tokenizer downloaded and saved to {tokenizer_path}", "success")
     
     return tokenizer
 
 
-def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device, compile_model: bool = True) -> Tuple[TransformerLM, CodeLlamaTokenizer]:
+def load_model_and_tokenizer(checkpoint_path: Path, device: torch.device, compile_model: bool = True) -> Tuple[TransformerLM, LLaMA2Tokenizer]:
     """Load model from checkpoint and tokenizer.
     
     Args:
@@ -604,7 +604,7 @@ def load_multiple_models(
     checkpoint_info: Union[List[Path], List[Tuple[Path, Path]]], 
     device: torch.device,
     compile_model: bool = True
-) -> Tuple[Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]], Dict[str, Dict], float]:
+) -> Tuple[Dict[str, Tuple[TransformerLM, LLaMA2Tokenizer]], Dict[str, Dict], float]:
     """Load multiple models from checkpoints.
     
     Args:
@@ -676,7 +676,7 @@ def load_multiple_models(
 
 
 
-def encode_prompt(tokenizer: CodeLlamaTokenizer, prompt: str, device: torch.device) -> Tuple[torch.Tensor, List[int], Dict]:
+def encode_prompt(tokenizer: LLaMA2Tokenizer, prompt: str, device: torch.device) -> Tuple[torch.Tensor, List[int], Dict]:
     """Encode prompt text into tokens with proper handling.
     
     Args:
@@ -730,7 +730,7 @@ def calculate_generation_stats(generated_ids: List[int], input_ids: List[int], g
     }
 
 
-def stream_tokens(tokenizer: CodeLlamaTokenizer, token_generator) -> Tuple[str, Dict]:
+def stream_tokens(tokenizer: LLaMA2Tokenizer, token_generator) -> Tuple[str, Dict]:
     """Stream tokens to console as they're generated.
     
     Args:
@@ -798,7 +798,7 @@ def stream_tokens(tokenizer: CodeLlamaTokenizer, token_generator) -> Tuple[str, 
 
 
 def generate_text_unified(
-    models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]],
+    models_dict: Dict[str, Tuple[TransformerLM, LLaMA2Tokenizer]],
     prompt: str,
     device: torch.device,
     stream: bool = True,
@@ -1319,7 +1319,7 @@ def get_generation_params_interactive(defaults: Optional[Dict[str, any]] = None,
 
 
 
-def run_generation_loop(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]], 
+def run_generation_loop(models_dict: Dict[str, Tuple[TransformerLM, LLaMA2Tokenizer]], 
                        device: torch.device, 
                        metadata: Optional[Dict] = None):
     """Run text generation loop."""
@@ -1374,7 +1374,7 @@ def run_generation_loop(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTok
             break
 
 
-def run_benchmark(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]], device: torch.device):
+def run_benchmark(models_dict: Dict[str, Tuple[TransformerLM, LLaMA2Tokenizer]], device: torch.device):
     """Run benchmark evaluation."""
     print(f"\n{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.CYAN}Starting benchmark evaluation...{Colors.ENDC}")
@@ -1455,7 +1455,7 @@ def run_benchmark(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer
     print_message("\nBenchmark completed successfully!", "success")
 
 
-def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]], 
+def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, LLaMA2Tokenizer]], 
                               device: torch.device, 
                               metadata: Optional[Dict] = None):
     """Run general knowledge evaluation."""
@@ -1697,7 +1697,7 @@ def run_general_knowledge_eval(models_dict: Dict[str, Tuple[TransformerLM, CodeL
     print_message("\nGeneral knowledge evaluation completed!", "success")
 
 
-def run_chat_mode(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]], 
+def run_chat_mode(models_dict: Dict[str, Tuple[TransformerLM, LLaMA2Tokenizer]], 
                   device: torch.device, 
                   metadata: Optional[Dict] = None):
     """Run interactive chat mode with conversation history.

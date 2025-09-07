@@ -11,7 +11,7 @@ from tqdm import tqdm
 import orjson
 
 # Import the existing tokenizer from your codebase
-from .tokenizer import CodeLlamaTokenizer
+from .tokenizer import LLaMA2Tokenizer
 
 
 class LIMATokenizer:
@@ -37,20 +37,20 @@ class LIMATokenizer:
         self.token_distribution = []
         
     def load_tokenizer(self):
-        """Load CodeLlama tokenizer from saved directory."""
-        tokenizer_path = Path("tokenizers/codellama_tokenizer")
+        """Load LLaMA-2 tokenizer from saved directory."""
+        tokenizer_path = Path("tokenizers/llama2_tokenizer")
         
-        # Create CodeLlamaTokenizer instance
-        self.tokenizer = CodeLlamaTokenizer()
+        # Create LLaMA2Tokenizer instance
+        self.tokenizer = LLaMA2Tokenizer()
         
         # Load the saved tokenizer
         if not tokenizer_path.exists():
             raise FileNotFoundError(
                 f"Tokenizer not found at {tokenizer_path}. "
-                "Please run tokenizer.py first to download/save the CodeLlama tokenizer."
+                "Please run tokenizer.py first to download/save the LLaMA-2 tokenizer."
             )
         
-        print(f"Loading CodeLlama tokenizer from {tokenizer_path}")
+        print(f"Loading LLaMA-2 tokenizer from {tokenizer_path}")
         self.tokenizer.load(str(tokenizer_path))
         
         # Get special token IDs

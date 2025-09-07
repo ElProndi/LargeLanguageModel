@@ -26,7 +26,7 @@ try:
     from ..utils.logging_utils import DualLogger
     from ..utils.scheduler import get_cosine_schedule_with_warmup
     from ..utils.metrics import MetricsTracker
-    from ..dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from ..dataset_preparation.tokenizer import LLaMA2Tokenizer
 except ImportError:
     # Fall back to absolute imports (when run directly)
     from src.utils.model import create_model
@@ -34,7 +34,7 @@ except ImportError:
     from src.utils.logging_utils import DualLogger
     from src.utils.scheduler import get_cosine_schedule_with_warmup
     from src.utils.metrics import MetricsTracker
-    from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from src.dataset_preparation.tokenizer import LLaMA2Tokenizer
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.set_float32_matmul_precision('medium')
@@ -143,7 +143,7 @@ class Trainer:
         
         # Setup tokenizer for visualization during validation
         print("Loading tokenizer for validation visualization...")
-        self.tokenizer = CodeLlamaTokenizer()
+        self.tokenizer = LLaMA2Tokenizer()
         self.tokenizer.load(self.config['paths']['tokenizer_dir'])
         print(f"Tokenizer loaded: vocab_size={self.tokenizer.vocab_size}")
         

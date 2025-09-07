@@ -30,14 +30,14 @@ import urllib.request
 try:
     # Try relative imports (when imported as a module)
     from ..utils.model import TransformerLM
-    from ..dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from ..dataset_preparation.tokenizer import LLaMA2Tokenizer
     # Import new benchmark modules
     from .perplexity_benchmark import PerplexityBenchmark
     from .hellaswag_benchmark import HellaSwagBenchmark
 except ImportError:
     # Fall back to absolute imports (when run directly)
     from src.utils.model import TransformerLM
-    from src.dataset_preparation.tokenizer import CodeLlamaTokenizer
+    from src.dataset_preparation.tokenizer import LLaMA2Tokenizer
     # Import new benchmark modules
     from perplexity_benchmark import PerplexityBenchmark
     from hellaswag_benchmark import HellaSwagBenchmark
@@ -107,14 +107,14 @@ class BenchmarkDatasets:
     
 
 
-def _load_tokenizer() -> CodeLlamaTokenizer:
+def _load_tokenizer() -> LLaMA2Tokenizer:
     """Load or download the CodeLlama tokenizer.
     
     Returns:
-        Loaded CodeLlamaTokenizer instance
+        Loaded LLaMA2Tokenizer instance
     """
     print("Loading tokenizer...")
-    tokenizer = CodeLlamaTokenizer()
+    tokenizer = LLaMA2Tokenizer()
     tokenizer_path = Path("tokenizers/codellama_tokenizer")
     
     if tokenizer_path.exists():
@@ -133,7 +133,7 @@ def _load_tokenizer() -> CodeLlamaTokenizer:
     return tokenizer
 
 
-def load_model_from_checkpoint(checkpoint_path: Union[str, Path], device: torch.device) -> Tuple[TransformerLM, CodeLlamaTokenizer]:
+def load_model_from_checkpoint(checkpoint_path: Union[str, Path], device: torch.device) -> Tuple[TransformerLM, LLaMA2Tokenizer]:
     """Load model from checkpoint with proper architecture handling.
     
     Args:
@@ -308,7 +308,7 @@ class ModelBenchmark:
     def load_models_from_checkpoints(
         self,
         checkpoint_paths: Union[List[Union[str, Path]], Dict[str, Union[str, Path]]]
-    ) -> Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer]]:
+    ) -> Dict[str, Tuple[TransformerLM, LLaMA2Tokenizer]]:
         """
         Load multiple models from checkpoint files.
         
