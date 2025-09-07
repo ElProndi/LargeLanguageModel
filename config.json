@@ -51,8 +51,8 @@
   },
   
   "training": {
-    "batch_size": 4,
-    "gradient_accumulation_steps": 128,
+    "batch_size": 1,
+    "gradient_accumulation_steps": 512,
     "num_epochs": 1,
     "learning_rate": 0.0006,
     "min_learning_rate": 0.0001,

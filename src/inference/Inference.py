@@ -1134,7 +1134,7 @@ def main():
     print(f"\n{Colors.BOLD}Select Inference Mode:{Colors.ENDC}")
     print("  1. Single model inference")
     print("  2. Multi-model comparison")
-    print("  3. Benchmark models")
+    print("  3. Benchmark models (LAMBADA/Perplexity/HellaSwag)")
     print("  4. General knowledge evaluation")
     print("  5. Chat mode (conversational interface)")
     print("  0. Exit")
@@ -1381,30 +1381,74 @@ def run_benchmark(models_dict: Dict[str, Tuple[TransformerLM, CodeLlamaTokenizer
     print(f"{Colors.CYAN}{len(models_dict)} models loaded for benchmarking{Colors.ENDC}")
     print(f"{Colors.CYAN}{'=' * 60}{Colors.ENDC}")
     
+    # First, select which benchmarks to run
+    print(f"\n{Colors.BOLD}Select Benchmarks to Run:{Colors.ENDC}")
+    benchmark_options = [
+        ('LAMBADA only', ['lambada']),
+        ('Perplexity only', ['perplexity']),
+        ('HellaSwag only', ['hellaswag']),
+        ('LAMBADA + Perplexity', ['lambada', 'perplexity']),
+        ('LAMBADA + HellaSwag', ['lambada', 'hellaswag']),
+        ('Perplexity + HellaSwag', ['perplexity', 'hellaswag']),
+        ('Full Suite (All 3)', ['lambada', 'perplexity', 'hellaswag'])
+    ]
+    
+    benchmark_items = [(desc, benchmarks) for desc, benchmarks in benchmark_options]
+    selected_benchmarks = select_items_interactive(benchmark_items, "Select benchmark suite:")
+    
+    if selected_benchmarks is None:
+        print_message("Benchmark cancelled.", "info")
+        return
+    
+    # Then select configuration based on selected benchmarks
     configs = [
         ('Quick', {
-            'lambada_samples': 50
+            'lambada_samples': 50,
+            'perplexity_sequences': 100,
+            'hellaswag_samples': 100
         }),
         ('Standard', {
-            'lambada_samples': 100
+            'lambada_samples': 100,
+            'perplexity_sequences': 500,
+            'hellaswag_samples': 500
         }),
         ('Comprehensive', {
-            'lambada_samples': 200
+            'lambada_samples': 200,
+            'perplexity_sequences': 1000,
+            'hellaswag_samples': 1000
         })
     ]
     
-    config_items = [(f"{name} ({cfg['lambada_samples']} LAMBADA samples)", cfg) for name, cfg in configs]
-    config = select_items_interactive(config_items, "Select LAMBADA Benchmark Configuration:")
+    # Build description based on selected benchmarks
+    config_items = []
+    for name, cfg in configs:
+        desc_parts = [name]
+        if 'lambada' in selected_benchmarks:
+            desc_parts.append(f"{cfg['lambada_samples']} LAMBADA")
+        if 'perplexity' in selected_benchmarks:
+            desc_parts.append(f"{cfg['perplexity_sequences']} PPL sequences")
+        if 'hellaswag' in selected_benchmarks:
+            desc_parts.append(f"{cfg['hellaswag_samples']} HellaSwag")
+        desc = f"{desc_parts[0]} ({', '.join(desc_parts[1:])})"
+        config_items.append((desc, cfg))
+    
+    config = select_items_interactive(config_items, "Select Benchmark Configuration:")
     
     if config is None:
         print_message("Benchmark cancelled.", "info")
         return
     
     print(f"\n{Colors.BOLD}Running Benchmarks...{Colors.ENDC}")
+    benchmark_list = ', '.join(selected_benchmarks)
+    print_message(f"Benchmarks: {benchmark_list}", "info")
     print_message("This may take several minutes.", "warning")
     
     benchmark = ModelBenchmark(device)
-    results = benchmark.run_full_benchmark(models_dict, benchmark_config=config)
+    results = benchmark.run_full_benchmark(
+        models_dict, 
+        benchmark_config=config,
+        benchmarks_to_run=selected_benchmarks
+    )
     
     print("\n" + format_benchmark_results(results))
     save_benchmark_results(results)

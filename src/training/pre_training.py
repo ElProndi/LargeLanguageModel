@@ -48,6 +48,7 @@ class Trainer:
         config_path: str = "config.json",
         model_size: str = None,
         test_mode: bool = False,
+        num_chunks: Optional[int] = None,
         resume_from: Optional[str] = None,
         experiment_name: Optional[str] = None
     ):
@@ -57,6 +58,7 @@ class Trainer:
             config_path: Path to configuration file
             model_size: Model size to use ("small" or "medium"). If None, uses default from config.
             test_mode: Train on 1 chunk (subset) out of 64 total chunks
+            num_chunks: Number of chunks to use for training (1-64). Overrides test mode and config defaults.
             resume_from: Path to checkpoint to resume from
             experiment_name: Name for this training run
         """
@@ -75,12 +77,39 @@ class Trainer:
             print(f"  • Model size: {actual_model_size}")
         
         self.test_mode = test_mode
-        if test_mode:
+        
+        # Always 64 total chunks available in the dataset
+        self.total_available_chunks = 64
+        
+        # Handle num_chunks parameter - determines how many chunks to actually train on
+        if num_chunks is not None:
+            # Validate num_chunks value
+            if num_chunks < 1 or num_chunks > self.total_available_chunks:
+                print(f"❌ Invalid num_chunks value: {num_chunks}. Must be between 1 and {self.total_available_chunks}.")
+                sys.exit(1)
+            
+            # Set how many chunks to train on
+            self.num_chunks_to_train = num_chunks
+            print(f"📊 Using {num_chunks} chunk{'s' if num_chunks > 1 else ''} for training (user-specified)")
+            
+            # Adjust logging intervals based on chunk count for better feedback
+            if num_chunks <= 4:
+                self.config['logging']['save_steps'] = 50   # Save checkpoint every 50 steps for small chunk counts
+                self.config['logging']['logging_steps'] = 5
+        elif test_mode:
+            # Test mode defaults to 1 chunk unless overridden by num_chunks
+            self.num_chunks_to_train = 1
             print("🧪 Running in TEST MODE - training on 1 chunk out of 64 total chunks")
             # max_steps will be calculated dynamically based on test dataset size
             self.config['logging']['eval_steps'] = 50  # Not used anymore, validation_interval is used instead
             self.config['logging']['save_steps'] = 50   # Save checkpoint every 50 steps in test mode
             self.config['logging']['logging_steps'] = 5
+        else:
+            # Use default from config (usually 64 chunks)
+            self.num_chunks_to_train = self.config['training'].get('num_data_subsets', 64)
+        
+        # For backwards compatibility, keep num_data_subsets as the number of chunks to train
+        self.num_data_subsets = self.num_chunks_to_train
         
         # Setup device - CUDA is required
         if not torch.cuda.is_available():
@@ -130,6 +159,7 @@ class Trainer:
         self.global_step = 0
         # max_steps will be calculated dynamically based on dataset size
         self.best_val_loss = float('inf')
+        self.is_best_model = False  # Track if current model is the best
         self.completed_subsets = []  # Track which subset indices have been completed
         self.recent_step_times = deque(maxlen=5)  # Track last 5 step times for ETA calculation
         
@@ -144,39 +174,39 @@ class Trainer:
         # This avoids loading ~13GB into GPU memory just to count batches
         print("Calculating training steps...", end='')
         
-        # Configure number of data subsets (default to 32)
-        self.num_data_subsets = self.config['training'].get('num_data_subsets', 64)
+        # num_data_subsets is already configured above based on num_chunks/test_mode/config
         
-        # Get statistics for all subsets using fixed eval mode
+        # Get statistics for all subsets we'll train on
         subset_stats = []
-        for subset_idx in range(self.num_data_subsets):
+        for subset_idx in range(self.num_chunks_to_train):
             stats = calculate_fixed_eval_dataloader_stats(
                 batch_size=self.config['training']['batch_size'],
-                test_mode=self.test_mode,
+                test_mode=False,  # Always use full subset for consistent calculation
                 subset_index=subset_idx,
-                num_subsets=self.num_data_subsets
+                num_subsets=self.total_available_chunks  # Always use 64 for correct file division
             )
             subset_stats.append(stats)
         
         # Calculate batch counts and dynamic max_steps based on actual dataset size
         num_epochs = self.config['training'].get('num_epochs', 1)
         
-        if self.test_mode:
-            # Test mode - calculate steps for first subset only (1/32 of the data)
+        # Calculate steps based on number of chunks to use
+        if self.num_chunks_to_train == 1:
+            # Single chunk training - use first subset only
             self.batches_per_epoch = subset_stats[0]['train_batches']
             self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
             if self.batches_per_epoch % self.gradient_accumulation_steps != 0:
                 self.steps_per_epoch += 1
             
-            # Set max_steps for test mode with epochs
+            # Set max_steps for single chunk with epochs
             self.max_steps = self.steps_per_epoch * num_epochs
             self.total_training_steps = self.max_steps
             
             if not resume_from:
-                print(f"  • Training on subset 1/{self.num_data_subsets} only (1 chunk out of {self.num_data_subsets} total): {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
+                print(f"  • Training on 1 chunk (out of 64 total available): {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
         else:
-            # Train on all subsets sequentially - sum all subsets
-            self.batches_per_epoch = sum(stats['train_batches'] for stats in subset_stats)
+            # Train on specified number of chunks sequentially - sum only the chunks we'll use
+            self.batches_per_epoch = sum(stats['train_batches'] for stats in subset_stats[:self.num_chunks_to_train])
             
             # With gradient accumulation, optimizer steps = batches / accumulation_steps
             self.steps_per_epoch = self.batches_per_epoch // self.gradient_accumulation_steps
@@ -184,18 +214,20 @@ class Trainer:
             if self.batches_per_epoch % self.gradient_accumulation_steps != 0:
                 self.steps_per_epoch += 1
             
-            # Set max_steps for all subsets with epochs
+            # Set max_steps for specified chunks with epochs
             self.max_steps = self.steps_per_epoch * num_epochs
             self.total_training_steps = self.max_steps
             
             if not resume_from:
-                print(f"  • Training on all {self.num_data_subsets} subsets: {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
+                print(f"  • Training on {self.num_chunks_to_train} chunks (out of 64 total available): {self.steps_per_epoch} steps/epoch × {num_epochs} epochs = {self.max_steps} total steps")
         
-        # Validation frequency: doubled - every 500 steps (or less for test mode)
-        if self.test_mode:
-            self.validation_interval = 25  # Validate every 25 steps in test mode
+        # Validation frequency: adjust based on number of chunks
+        if self.num_chunks_to_train <= 4:
+            self.validation_interval = 25  # Validate every 25 steps for small chunk counts
+        elif self.num_chunks_to_train <= 16:
+            self.validation_interval = 100  # Validate every 100 steps for medium chunk counts
         else:
-            self.validation_interval = max(500, self.max_steps // 20)  # At least every 500 steps
+            self.validation_interval = max(500, self.max_steps // 20)  # At least every 500 steps for large chunk counts
         
         # Setup training components (scheduler needs total_training_steps)
         print(" done.\nSetting up optimizer and scheduler...")
@@ -247,7 +279,7 @@ class Trainer:
         
         return model
     
-    def _create_dataloaders(self, subset_index: int = 0, num_subsets: int = None) -> Tuple[DataLoader, DataLoader, Dict]:
+    def _create_dataloaders(self, subset_index: int = 0) -> Tuple[DataLoader, DataLoader, Dict]:
         """Create train and eval data loaders using fixed evaluation dataset.
         
         The eval dataset (tokens_0.npy) is loaded once on first call and reused.
@@ -255,24 +287,21 @@ class Trainer:
         
         Args:
             subset_index: 0-based index of the subset to load for training
-            num_subsets: Total number of subsets (defaults to self.num_data_subsets)
         
         Returns:
             Tuple of (train_loader, eval_loader, info_dict)
         """
-        if num_subsets is None:
-            num_subsets = self.num_data_subsets
-        
-        subset_desc = f"subset {subset_index+1}/{num_subsets}"
+        subset_desc = f"subset {subset_index+1}/{self.num_chunks_to_train}"
         print(f"\nLoading data: {subset_desc}")
         
         # Create dataloaders with fixed eval dataset
+        # Always use total_available_chunks for correct file division
         train_loader, eval_loader, info = create_fixed_eval_dataloaders(
             batch_size=self.config['training']['batch_size'],
-            test_mode=self.test_mode,
+            test_mode=False,  # Never use test_mode in dataloader (we control chunks ourselves)
             verbose=True,
             subset_index=subset_index,  # Load only specified subset for training
-            num_subsets=num_subsets  # Total number of subsets
+            num_subsets=self.total_available_chunks  # Always 64 for correct file division
         )
         
         # Store references
@@ -297,11 +326,11 @@ class Trainer:
             new_subset_index: 0-based index of the subset to switch to
         """
         if hasattr(self, 'current_data_subset_index') and self.current_data_subset_index == new_subset_index:
-            print(f"Already using subset {new_subset_index+1}/{self.num_data_subsets}, skipping switch")
+            print(f"Already using subset {new_subset_index+1}/{self.num_chunks_to_train}, skipping switch")
             return
         
-        old_desc = f"subset {self.current_data_subset_index+1}/{self.num_data_subsets}" if hasattr(self, 'current_data_subset_index') else "unknown"
-        new_desc = f"subset {new_subset_index+1}/{self.num_data_subsets}"
+        old_desc = f"subset {self.current_data_subset_index+1}/{self.num_chunks_to_train}" if hasattr(self, 'current_data_subset_index') else "unknown"
+        new_desc = f"subset {new_subset_index+1}/{self.num_chunks_to_train}"
         print(f"\nSwitching training data: {old_desc} → {new_desc}")
         
         # Destroy current training dataloader if it exists (keep eval loader)
@@ -567,11 +596,12 @@ class Trainer:
         
         return metrics
     
-    def save_checkpoint(self, checkpoint_name: Optional[str] = None):
+    def save_checkpoint(self, checkpoint_name: Optional[str] = None, is_best: bool = False):
         """Save training checkpoint.
         
         Args:
             checkpoint_name: Optional specific name for checkpoint
+            is_best: Whether this is the best model so far
         """
         if checkpoint_name is None:
             checkpoint_name = f"checkpoint_step_{self.global_step}.pt"
@@ -599,11 +629,11 @@ class Trainer:
         latest_path = self.checkpoint_dir / "checkpoint_latest.pt"
         torch.save(checkpoint, latest_path)
         
-        # Save best model separately
-        if self.best_val_loss < float('inf'):
+        # Save best model if this is the best one
+        if is_best:
             best_path = self.checkpoint_dir / "checkpoint_best.pt"
-            if not best_path.exists() or self.metrics.get_latest_metrics().get('val_loss', float('inf')) <= self.best_val_loss:
-                torch.save(checkpoint, best_path)
+            torch.save(checkpoint, best_path)
+            print(f"✨ Best model saved: {best_path.name}")
         
         print(f"\n💾 Checkpoint saved: {checkpoint_path.name}")
     
@@ -691,6 +721,7 @@ class Trainer:
         # Restore training state
         self.global_step = checkpoint['global_step']
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        self.is_best_model = False  # Reset best model flag on resume
         
         # Restore completed subsets list
         self.completed_subsets = checkpoint.get('completed_subsets', [])
@@ -705,75 +736,53 @@ class Trainer:
         
         # Check if current subset is already complete and move to next if needed
         if saved_subset_idx in self.completed_subsets:
-            if saved_subset_idx < self.num_data_subsets - 1:
+            if saved_subset_idx < self.num_chunks_to_train - 1:
                 next_subset_idx = saved_subset_idx + 1
                 print(f"  Subset {saved_subset_idx+1} already complete, moving to subset {next_subset_idx+1}")
                 saved_subset_idx = next_subset_idx
             else:
                 print(f"  All subsets completed! Training is finished.")
-                saved_subset_idx = self.num_data_subsets - 1  # Stay on last subset
+                saved_subset_idx = self.num_chunks_to_train - 1  # Stay on last subset
         
-        # Recalculate steps dynamically based on train_quarter flag and remaining data
+        # Recalculate steps dynamically based on actual number of chunks
         from dataloader import calculate_fixed_eval_dataloader_stats
         
         # Get num_epochs from config
         num_epochs = self.config['training'].get('num_epochs', 1)
         
-        if self.test_mode:
-            # Test mode - train on single subset only
-            current_subset_stats = calculate_fixed_eval_dataloader_stats(
+        # Calculate total steps based on number of chunks to use
+        total_steps = 0
+        
+        for subset_idx in range(self.num_chunks_to_train):
+            subset_stats = calculate_fixed_eval_dataloader_stats(
                 batch_size=self.config['training']['batch_size'],
-                test_mode=self.test_mode,
-                subset_index=saved_subset_idx,
-                num_subsets=self.num_data_subsets
+                test_mode=False,  # Always use full subset for consistent calculation
+                subset_index=subset_idx,
+                num_subsets=self.total_available_chunks  # Always use 64 for correct file division
             )
-            
-            steps_in_current_subset = current_subset_stats['train_batches'] // self.gradient_accumulation_steps
-            if current_subset_stats['train_batches'] % self.gradient_accumulation_steps != 0:
-                steps_in_current_subset += 1
-            
-            # For test mode, complete the remaining steps of the current subset
-            # accounting for the epochs
-            self.max_steps = steps_in_current_subset * num_epochs
-            self.total_training_steps = self.max_steps
-        else:
-            # Train on all subsets sequentially
-            # Calculate total steps for ALL subsets (not just remaining)
-            total_steps = 0
-            
-            for subset_idx in range(self.num_data_subsets):
-                subset_stats = calculate_fixed_eval_dataloader_stats(
-                    batch_size=self.config['training']['batch_size'],
-                    test_mode=self.test_mode,
-                    subset_index=subset_idx,
-                    num_subsets=self.num_data_subsets
-                )
-                steps_in_subset = subset_stats['train_batches'] // self.gradient_accumulation_steps
-                if subset_stats['train_batches'] % self.gradient_accumulation_steps != 0:
-                    steps_in_subset += 1
-                total_steps += steps_in_subset
-            
-            # Set max_steps for all subsets with epochs
-            self.max_steps = total_steps * num_epochs
-            self.total_training_steps = self.max_steps
+            steps_in_subset = subset_stats['train_batches'] // self.gradient_accumulation_steps
+            if subset_stats['train_batches'] % self.gradient_accumulation_steps != 0:
+                steps_in_subset += 1
+            total_steps += steps_in_subset
+        
+        # Set max_steps for specified chunks with epochs
+        self.max_steps = total_steps * num_epochs
+        self.total_training_steps = self.max_steps
         
         print(f"  Resumed from step {self.global_step}")
         print(f"  Best validation loss: {self.best_val_loss:.4f}")
-        print(f"  Data subset: {saved_subset_idx+1}/{self.num_data_subsets}")
+        print(f"  Data subset: {saved_subset_idx+1}/{self.num_chunks_to_train}")
         print(f"  Completed subsets: {self.completed_subsets}")
         
         # Calculate progress information
         remaining_steps = self.max_steps - self.global_step
         progress_percent = (self.global_step / self.max_steps * 100) if self.max_steps > 0 else 0
         
-        if self.test_mode:
-            print(f"  Mode: Test mode (single subset training)")
-            print(f"  Progress: {self.global_step}/{self.max_steps} steps ({progress_percent:.1f}%)")
-            print(f"  Remaining: {remaining_steps} steps")
-        else:
-            print(f"  Mode: All {self.num_data_subsets} subsets training ({num_epochs} epoch{'s' if num_epochs > 1 else ''})")
-            print(f"  Progress: {self.global_step}/{self.max_steps} steps ({progress_percent:.1f}%)")
-            print(f"  Remaining: {remaining_steps} steps")
+        # Show mode based on actual number of chunks
+        chunk_word = "chunk" if self.num_chunks_to_train == 1 else "chunks"
+        print(f"  Mode: Training on {self.num_chunks_to_train} {chunk_word} ({num_epochs} epoch{'s' if num_epochs > 1 else ''})")
+        print(f"  Progress: {self.global_step}/{self.max_steps} steps ({progress_percent:.1f}%)")
+        print(f"  Remaining: {remaining_steps} steps")
         
         # Load the appropriate data subset
         if saved_subset_idx is not None:
@@ -808,7 +817,7 @@ class Trainer:
         try:
             while self.global_step < self.max_steps:
                 # Cycle through data subsets continuously
-                for subset_idx in range(current_subset_idx, self.num_data_subsets):
+                for subset_idx in range(current_subset_idx, self.num_chunks_to_train):
                     
                     # Check if we've reached max_steps before processing new subset
                     if self.global_step >= self.max_steps:
@@ -816,7 +825,7 @@ class Trainer:
                     
                     # Skip already completed subsets
                     if subset_idx in self.completed_subsets:
-                        print(f"Skipping already completed subset {subset_idx+1}/{self.num_data_subsets}")
+                        print(f"Skipping already completed subset {subset_idx+1}/{self.num_chunks_to_train}")
                         continue
                     
                     # Load the appropriate data subset
@@ -828,7 +837,7 @@ class Trainer:
                             # Switch to new subset
                             self._switch_data_subset(subset_idx)
                     
-                    print(f"\nTraining on subset {subset_idx+1}/{self.num_data_subsets} (Step {self.global_step}/{self.max_steps})")
+                    print(f"\nTraining on subset {subset_idx+1}/{self.num_chunks_to_train} (Step {self.global_step}/{self.max_steps})")
                     print(f"{'─'*50}")
                     
                     # Training on current data subset
@@ -918,7 +927,7 @@ class Trainer:
                                     eta_str = " | ETA: Complete"
                             
                             # Create fraction label for display
-                            subset_label = f"{subset_idx+1}/{self.num_data_subsets}"
+                            subset_label = f"{subset_idx+1}/{self.num_chunks_to_train}"
                             
                             # Get current learning rate
                             current_lr = self.optimizer.param_groups[0]['lr']
@@ -947,7 +956,7 @@ class Trainer:
                             # validation_interval is already correctly calculated in __init__
                             if self.global_step > 0 and self.global_step % self.validation_interval == 0:
                                 print(f"\n{'='*70}")
-                                print(f"Validation at step {self.global_step} (on subset {subset_idx+1}/{self.num_data_subsets})")
+                                print(f"Validation at step {self.global_step} (on subset {subset_idx+1}/{self.num_chunks_to_train})")
                                 print(f"{'='*70}")
                                 
                                 # Run validation on current subset's validation split
@@ -957,16 +966,19 @@ class Trainer:
                                 self.logger.log_scalars(val_metrics, self.global_step, prefix="validation")
                                 
                                 # Update best model
+                                is_new_best = False
                                 if val_metrics['val_loss'] < self.best_val_loss:
                                     self.best_val_loss = val_metrics['val_loss']
+                                    self.is_best_model = True
+                                    is_new_best = True
                                     print(f"✨ New best validation loss: {self.best_val_loss:.4f}")
                                 
                                 # Print validation results
                                 print(f"Val Loss: {val_metrics['val_loss']:.4f} | Val PPL: {val_metrics['val_perplexity']:.2f}")
                                 print(f"{'='*70}\n")
                                 
-                                # Save checkpoint after each validation
-                                self.save_checkpoint()
+                                # Save checkpoint after each validation, marking if it's the best
+                                self.save_checkpoint(is_best=is_new_best)
                                 
                                 # Additional GPU memory cleanup after validation
                                 # This ensures any remaining cached memory is fully released
@@ -984,32 +996,32 @@ class Trainer:
                     # After processing all batches in this subset, mark it as complete
                     if subset_idx not in self.completed_subsets:
                         self.completed_subsets.append(subset_idx)
-                        print(f"\n✓ Completed subset {subset_idx+1}/{self.num_data_subsets}")
+                        print(f"\n✓ Completed subset {subset_idx+1}/{self.num_chunks_to_train}")
                         print(f"Saving checkpoint after completing subset {subset_idx+1}...")
                         self.save_checkpoint(f"checkpoint_subset_{subset_idx+1}_complete.pt")
                         
                         # Check if we've completed all subsets
-                        if len(self.completed_subsets) == self.num_data_subsets:
-                            print(f"\n🎉 All {self.num_data_subsets} subsets completed! Training finished.")
+                        if len(self.completed_subsets) == self.num_chunks_to_train:
+                            print(f"\n🎉 All {self.num_chunks_to_train} subsets completed! Training finished.")
                             break
                 
-                # Check if we should continue or stop based on test mode
+                # Check if we should continue or stop
                 if self.global_step >= self.max_steps:
-                    if self.test_mode:
-                        print(f"\nCompleted current subset. Stopping training (test mode).")
+                    if self.num_chunks_to_train == 1:
+                        print(f"\nCompleted training on single chunk.")
                         break
                     else:
-                        # In full training mode, we've completed all subsets
-                        print(f"\nCompleted all training steps across all subsets.")
+                        # Completed all specified chunks
+                        print(f"\nCompleted all training steps across {self.num_chunks_to_train} chunks.")
                         break
                 
-                # Reset to first subset for next epoch if not in test mode
-                if not self.test_mode and subset_idx == self.num_data_subsets - 1:
-                    # Completed all subsets but haven't reached max_steps
+                # Reset to first subset for next epoch if training on multiple chunks
+                if self.num_chunks_to_train > 1 and subset_idx == self.num_chunks_to_train - 1:
+                    # Completed all specified chunks but haven't reached max_steps
                     # Reset for another pass through the data
                     current_subset_idx = 0
                     self.completed_subsets = []  # Reset completed subsets for next epoch
-                    print(f"\nStarting new epoch through all {self.num_data_subsets} subsets...")
+                    print(f"\nStarting new epoch through all {self.num_chunks_to_train} chunks...")
         
         except KeyboardInterrupt:
             print("\n\nTraining interrupted by user")
@@ -1051,6 +1063,8 @@ def main():
                        help='Model size to use (small, medium, or large). Defaults to config setting.')
     parser.add_argument('--test', action='store_true',
                        help='Run in test mode - train on 1 chunk (1/64 of data)')
+    parser.add_argument('--num-chunks', type=int, default=None,
+                       help='Number of chunks to use for training (1-64). Overrides test mode and config defaults.')
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint to resume from')
     parser.add_argument('--name', type=str, default=None,
@@ -1063,6 +1077,7 @@ def main():
         config_path=args.config,
         model_size=args.model_size,
         test_mode=args.test,
+        num_chunks=args.num_chunks,
         resume_from=args.resume,
         experiment_name=args.name
     )

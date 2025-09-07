@@ -14,6 +14,7 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils import checkpoint
 
 from .rope import RotaryEmbedding
 from .activations import SwiGLU
@@ -168,33 +169,66 @@ class TransformerLayer(nn.Module):
         # Dropout
         self.dropout = nn.Dropout(dropout)
     
-    def forward(
-        self,
-        hidden_states: torch.Tensor
-    ) -> torch.Tensor:
-        # Attention block with pre-norm
-        residual = hidden_states
+    def _attention_block(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Helper method for gradient checkpointing the attention block."""
+        # Apply layer norm
         hidden_states = self.norm1(hidden_states)
         
         # Self-attention
-        hidden_states = self.self_attn(
-            hidden_states
-        )
+        hidden_states = self.self_attn(hidden_states)
         
+        # Apply dropout
         hidden_states = self.dropout(hidden_states)
         
-        # Apply residual connection
-        hidden_states = residual + hidden_states
-        
-        # FFN block with pre-norm
-        residual = hidden_states
+        return hidden_states
+    
+    def _ffn_block(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Helper method for gradient checkpointing the FFN block."""
+        # Apply layer norm
         hidden_states = self.norm2(hidden_states)
         
         # Feed-forward network with SwiGLU
         hidden_states = self.ffn(hidden_states)
         
-        # Apply residual connection
-        hidden_states = residual + hidden_states
+        return hidden_states
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        # Attention block with gradient checkpointing during training
+        residual = hidden_states
+        
+        if self.training:
+            # Use gradient checkpointing during training to save memory
+            attn_output = checkpoint.checkpoint(
+                self._attention_block,
+                hidden_states,
+                use_reentrant=False  # Better compatibility with autograd
+            )
+        else:
+            # No checkpointing during inference for speed
+            attn_output = self._attention_block(hidden_states)
+        
+        # Apply residual connection (outside checkpointing for stability)
+        hidden_states = residual + attn_output
+        
+        # FFN block with gradient checkpointing during training
+        residual = hidden_states
+        
+        if self.training:
+            # Use gradient checkpointing during training to save memory
+            ffn_output = checkpoint.checkpoint(
+                self._ffn_block,
+                hidden_states,
+                use_reentrant=False  # Better compatibility with autograd
+            )
+        else:
+            # No checkpointing during inference for speed
+            ffn_output = self._ffn_block(hidden_states)
+        
+        # Apply residual connection (outside checkpointing for stability)
+        hidden_states = residual + ffn_output
         
         return hidden_states
 
